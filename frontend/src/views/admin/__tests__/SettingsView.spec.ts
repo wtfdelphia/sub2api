@@ -1300,3 +1300,24 @@ describe("admin SettingsView platform quota matrix", () => {
     expect(quotas["anthropic"]?.["daily"]).toBe(null);
   });
 });
+
+
+describe('admin SettingsView linuxdo bypass registration visibility', () => {
+  it('keeps linuxdo bypass registration control visible when linuxdo is disabled', async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      linuxdo_connect_enabled: false,
+      linuxdo_connect_bypass_registration: true,
+      email_verify_enabled: false,
+      force_email_on_third_party_signup: false,
+    });
+
+    const wrapper = mountView();
+    await flushPromises();
+    await openSecurityTab(wrapper);
+
+    expect(wrapper.text()).toContain('admin.settings.linuxdo.bypassRegistration');
+    // Hint that master switch must be enabled first (shown when disabled)
+    expect(wrapper.text()).toMatch(/Enable LinuxDo Login first|请先启用 LinuxDo/);
+  });
+});

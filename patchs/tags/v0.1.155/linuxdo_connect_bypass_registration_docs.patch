@@ -1,6 +1,6 @@
 diff --git a/docs/AUTH_REGISTRATION_LINUXDO_ANALYSIS.md b/docs/AUTH_REGISTRATION_LINUXDO_ANALYSIS.md
 new file mode 100644
-index e69de29b..295e99b8 100644
+index 00000000..11111111
 --- /dev/null
 +++ b/docs/AUTH_REGISTRATION_LINUXDO_ANALYSIS.md
 @@ -0,0 +1,368 @@
@@ -372,10 +372,9 @@ index e69de29b..295e99b8 100644
 +---
 +
 +*本文档由 CodeGraph 辅助静态分析生成，描述以当前仓库实现为准。*
-
 diff --git a/docs/LINUXDO_BYPASS_REGISTRATION_PROPOSAL.md b/docs/LINUXDO_BYPASS_REGISTRATION_PROPOSAL.md
 new file mode 100644
-index e69de29b..c1c716b7 100644
+index 00000000..11111111
 --- /dev/null
 +++ b/docs/LINUXDO_BYPASS_REGISTRATION_PROPOSAL.md
 @@ -0,0 +1,535 @@
@@ -914,10 +913,9 @@ index e69de29b..c1c716b7 100644
 +---
 +
 +*本文为 `linuxdo_connect_bypass_registration` 设计方案；确认 §10 决策后可按 §9 实施。*
-
 diff --git a/docs/LINUXDO_EMAIL_BYPASS_PROPOSAL.md b/docs/LINUXDO_EMAIL_BYPASS_PROPOSAL.md
 new file mode 100644
-index e69de29b..a2f2e513 100644
+index 00000000..11111111
 --- /dev/null
 +++ b/docs/LINUXDO_EMAIL_BYPASS_PROPOSAL.md
 @@ -0,0 +1,435 @@
@@ -1356,4 +1354,3 @@ index e69de29b..a2f2e513 100644
 +---
 +
 +*本文为改造方案，确认产品决策后可按 §9 实施。*
-

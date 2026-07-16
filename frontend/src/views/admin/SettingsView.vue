@@ -1715,6 +1715,62 @@
                 <Toggle v-model="form.linuxdo_connect_enabled" />
               </div>
 
+              <!-- Bypass is always visible so it does not "disappear" when the
+                   LinuxDo master switch is toggled. Credential fields stay gated. -->
+              <div
+                class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
+              >
+                <div class="min-w-0 pr-4">
+                  <label class="font-medium text-gray-900 dark:text-white">{{
+                    t("admin.settings.linuxdo.bypassRegistration")
+                  }}</label>
+                  <p class="text-sm text-gray-500 dark:text-gray-400">
+                    {{
+                      localText(
+                        '仅旁路全局「开放注册」。与「邮箱验证」「第三方注册强制绑定邮箱」正交，不会自动关闭邮箱绑定。LinuxDo 无企业成员限制，开启后任意成功 OAuth 的用户可建号；建议同时开启邀请码。',
+                        'Only bypasses global "Registration Enabled". Independent from Email Verification and "Require email on third-party signup". Warning: LinuxDo has no corporate membership gate; prefer enabling invitation codes as well.',
+                      )
+                    }}
+                  </p>
+                  <p
+                    v-if="!form.linuxdo_connect_enabled"
+                    class="mt-1 text-xs text-amber-600 dark:text-amber-400"
+                  >
+                    {{
+                      localText(
+                        '请先启用 LinuxDo 登录后再修改此开关。此处始终显示当前已保存的状态，避免切换主开关后“消失”。',
+                        'Enable LinuxDo Login first to change this switch. The current saved value is still shown here so it does not disappear.',
+                      )
+                    }}
+                  </p>
+                  <p
+                    v-else-if="form.email_verify_enabled || form.force_email_on_third_party_signup"
+                    class="mt-1 text-xs text-gray-500 dark:text-gray-400"
+                  >
+                    {{
+                      localText(
+                        '注意：当前已开启「邮箱验证」和/或「第三方注册强制绑定邮箱」，因此即使开启本开关，新 LinuxDo 用户仍可能需要绑定真实邮箱。',
+                        'Note: Email Verification and/or "Require email on third-party signup" are on, so new LinuxDo users may still need to bind a real email even with this switch enabled.',
+                      )
+                    }}
+                  </p>
+                </div>
+                <div
+                  class="shrink-0"
+                  :class="!form.linuxdo_connect_enabled ? 'pointer-events-none opacity-50' : ''"
+                  :title="
+                    !form.linuxdo_connect_enabled
+                      ? localText(
+                          '请先启用 LinuxDo 登录后再修改此开关',
+                          'Enable LinuxDo Login before changing this switch',
+                        )
+                      : undefined
+                  "
+                >
+                  <Toggle v-model="form.linuxdo_connect_bypass_registration" />
+                </div>
+              </div>
+
               <div
                 v-if="form.linuxdo_connect_enabled"
                 class="border-t border-gray-100 pt-4 dark:border-dark-700"
@@ -1802,20 +1858,6 @@
                     <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
                       {{ t("admin.settings.linuxdo.redirectUrlHint") }}
                     </p>
-                  </div>
-
-                  <div
-                    class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
-                  >
-                    <div>
-                      <label class="font-medium text-gray-900 dark:text-white">{{
-                        t("admin.settings.linuxdo.bypassRegistration")
-                      }}</label>
-                      <p class="text-sm text-gray-500 dark:text-gray-400">
-                        {{ t("admin.settings.linuxdo.bypassRegistrationHint") }}
-                      </p>
-                    </div>
-                    <Toggle v-model="form.linuxdo_connect_bypass_registration" />
                   </div>
                 </div>
               </div>
@@ -3386,6 +3428,14 @@
                   </label>
                   <p class="text-sm text-gray-500 dark:text-gray-400">
                     {{ t("admin.settings.authSourceDefaults.requireEmailHint") }}
+                  </p>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    {{
+                      localText(
+                        '与「邮箱验证」独立：即使关闭邮箱验证，开启本开关时 LinuxDo/OIDC/微信等第三方新用户仍必须绑定真实邮箱。',
+                        'Independent from Email Verification: even when verification is off, enabling this still forces third-party new users (LinuxDo/OIDC/WeChat/etc.) to bind a real email.',
+                      )
+                    }}
                   </p>
                 </div>
                 <Toggle v-model="form.force_email_on_third_party_signup" />

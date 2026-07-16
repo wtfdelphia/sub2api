@@ -172,7 +172,7 @@ index b4c1f3af..72df9992 100644
  		DingTalkConnectClientID:                                updatedSettings.DingTalkConnectClientID,
  		DingTalkConnectClientSecretConfigured:                  updatedSettings.DingTalkConnectClientSecretConfigured,
 diff --git a/backend/internal/handler/auth_linuxdo_oauth.go b/backend/internal/handler/auth_linuxdo_oauth.go
-index 92720495..0c39a5bd 100644
+index 92720495..c059eec4 100644
 --- a/backend/internal/handler/auth_linuxdo_oauth.go
 +++ b/backend/internal/handler/auth_linuxdo_oauth.go
 @@ -326,7 +326,26 @@ func (h *AuthHandler) LinuxDoOAuthCallback(c *gin.Context) {
@@ -227,7 +227,7 @@ index 92720495..0c39a5bd 100644
  		"force_email_on_signup":     forceEmailOnSignup,
  		"choice_reason":             "third_party_signup",
  	}
-@@ -469,7 +490,13 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
+@@ -469,12 +490,23 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
  	if forceEmailOnSignup && compatEmailUser == nil {
  		completionResponse["choice_reason"] = "force_email_on_signup"
  	}
@@ -241,8 +241,19 @@ index 92720495..0c39a5bd 100644
 +	} else if (emailVerificationRequired || forceEmailOnSignup) && compatEmailUser == nil {
  		completionResponse["step"] = "create_account_required"
  		completionResponse["email_binding_required"] = true
- 		completionResponse["force_email_on_signup"] = true
-@@ -498,6 +525,32 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
+-		completionResponse["force_email_on_signup"] = true
++		// force_email_on_signup must reflect the dedicated setting only.
++		// email_verify_enabled also requires binding, but is a different gate.
++		completionResponse["force_email_on_signup"] = forceEmailOnSignup
++		completionResponse["email_verification_required"] = emailVerificationRequired
+ 		if emailVerificationRequired {
+ 			completionResponse["choice_reason"] = "email_verification_required"
++		} else if forceEmailOnSignup {
++			completionResponse["choice_reason"] = "force_email_on_signup"
+ 		}
+ 		delete(completionResponse, "email")
+ 		delete(completionResponse, "resolved_email")
+@@ -498,6 +530,32 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
  	})
  }
  
@@ -276,10 +287,21 @@ index 92720495..0c39a5bd 100644
  	InvitationCode   string `json:"invitation_code" binding:"required"`
  	AffCode          string `json:"aff_code,omitempty"`
 diff --git a/backend/internal/handler/auth_linuxdo_oauth_test.go b/backend/internal/handler/auth_linuxdo_oauth_test.go
-index 1de9a132..4d6388f0 100644
+index 1de9a132..48129b9a 100644
 --- a/backend/internal/handler/auth_linuxdo_oauth_test.go
 +++ b/backend/internal/handler/auth_linuxdo_oauth_test.go
-@@ -1223,14 +1223,91 @@ func newLinuxDoOAuthHandlerAndClientWithEmailVerification(
+@@ -692,7 +692,9 @@ func TestLinuxDoOAuthCallbackEmailVerificationCompletesWithBoundEmail(t *testing
+ 	require.True(t, ok)
+ 	require.Equal(t, "create_account_required", completion["step"])
+ 	require.Equal(t, true, completion["email_binding_required"])
+-	require.Equal(t, true, completion["force_email_on_signup"])
++	// Only email_verify_enabled is on here; do not mislabel as force_email_on_signup.
++	require.Equal(t, false, completion["force_email_on_signup"])
++	require.Equal(t, true, completion["email_verification_required"])
+ 	require.Equal(t, "email_verification_required", completion["choice_reason"])
+ 	require.NotContains(t, completion, "email")
+ 	require.NotContains(t, completion, "resolved_email")
+@@ -1223,14 +1225,91 @@ func newLinuxDoOAuthHandlerAndClientWithEmailVerification(
  }
  
  func configureLinuxDoOAuthTestHandler(handler *AuthHandler, oauthCfg config.LinuxDoConnectConfig) {
@@ -718,10 +740,10 @@ index 55c8088b..58d6c15b 100644
    dingtalk_connect_client_id?: string;
    dingtalk_connect_client_secret?: string;
 diff --git a/frontend/src/i18n/locales/en/admin/settings.ts b/frontend/src/i18n/locales/en/admin/settings.ts
-index e08be9f5..63d15e6c 100644
+index e08be9f5..e64c78fd 100644
 --- a/frontend/src/i18n/locales/en/admin/settings.ts
 +++ b/frontend/src/i18n/locales/en/admin/settings.ts
-@@ -161,7 +161,10 @@ export default {
+@@ -161,7 +161,14 @@ export default {
          redirectUrlHint:
            'Must match the redirect URL configured in Connect.Linux.Do (must be an absolute http(s) URL)',
          quickSetCopy: 'Generate & Copy (current site)',
@@ -729,15 +751,19 @@ index e08be9f5..63d15e6c 100644
 +        redirectUrlSetAndCopied: 'Redirect URL generated and copied to clipboard',
 +        bypassRegistration: 'Allow LinuxDo Registration',
 +        bypassRegistrationHint:
-+          'Allow users to register via LinuxDo login even when global registration is disabled. Warning: LinuxDo has no corporate membership gate; any user who completes LinuxDo OAuth can create an account. Prefer enabling invitation codes as well.'
++          'Only bypasses global "Registration Enabled". Independent from Email Verification and "Require email on third-party signup". Warning: LinuxDo has no corporate membership gate; any user who completes LinuxDo OAuth can create an account. Prefer enabling invitation codes as well.',
++        bypassRegistrationDisabledHint:
++          'Enable LinuxDo Login first to change this switch. The current saved value is still shown here so it does not disappear.',
++        bypassRegistrationEmailGateHint:
++          'Note: Email Verification and/or "Require email on third-party signup" are on, so new LinuxDo users may still need to bind a real email even with this switch enabled.',
        },
        dingtalk: {
          title: 'DingTalk Login',
 diff --git a/frontend/src/i18n/locales/zh/admin/settings.ts b/frontend/src/i18n/locales/zh/admin/settings.ts
-index 08c0dbcd..65d076b8 100644
+index 08c0dbcd..2e7e426f 100644
 --- a/frontend/src/i18n/locales/zh/admin/settings.ts
 +++ b/frontend/src/i18n/locales/zh/admin/settings.ts
-@@ -160,7 +160,10 @@ export default {
+@@ -160,7 +160,14 @@ export default {
          redirectUrlPlaceholder: 'https://your-domain.com/api/v1/auth/oauth/linuxdo/callback',
          redirectUrlHint: '需与 Connect.Linux.Do 中配置的回调地址一致（必须是 http(s) 完整 URL）',
          quickSetCopy: '使用当前站点生成并复制',
@@ -745,36 +771,97 @@ index 08c0dbcd..65d076b8 100644
 +        redirectUrlSetAndCopied: '已使用当前站点生成回调地址并复制到剪贴板',
 +        bypassRegistration: '开放 LinuxDo 注册',
 +        bypassRegistrationHint:
-+          '即使「开放注册」关闭时也可以通过 LinuxDo 登录来注册。注意：LinuxDo 无企业成员限制，开启后任意成功完成 OAuth 的 LinuxDo 用户均可建号；建议同时开启邀请码。'
++          '仅旁路全局「开放注册」。与「邮箱验证」「第三方注册强制绑定邮箱」正交，不会自动关闭邮箱绑定。注意：LinuxDo 无企业成员限制，开启后任意成功完成 OAuth 的 LinuxDo 用户均可建号；建议同时开启邀请码。',
++        bypassRegistrationDisabledHint:
++          '请先启用 LinuxDo 登录后再修改此开关。此处始终显示当前已保存的状态，避免切换主开关后“消失”。',
++        bypassRegistrationEmailGateHint:
++          '注意：当前已开启「邮箱验证」和/或「第三方注册强制绑定邮箱」，因此即使开启本开关，新 LinuxDo 用户仍可能需要绑定真实邮箱。',
        },
        dingtalk: {
          title: '钉钉登录',
 diff --git a/frontend/src/views/admin/SettingsView.vue b/frontend/src/views/admin/SettingsView.vue
-index 26253c7e..7f29f88a 100644
+index 26253c7e..6b08ecbc 100644
 --- a/frontend/src/views/admin/SettingsView.vue
 +++ b/frontend/src/views/admin/SettingsView.vue
-@@ -1803,6 +1803,20 @@
-                       {{ t("admin.settings.linuxdo.redirectUrlHint") }}
-                     </p>
-                   </div>
-+
-+                  <div
-+                    class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
-+                  >
-+                    <div>
-+                      <label class="font-medium text-gray-900 dark:text-white">{{
-+                        t("admin.settings.linuxdo.bypassRegistration")
-+                      }}</label>
-+                      <p class="text-sm text-gray-500 dark:text-gray-400">
-+                        {{ t("admin.settings.linuxdo.bypassRegistrationHint") }}
-+                      </p>
-+                    </div>
-+                    <Toggle v-model="form.linuxdo_connect_bypass_registration" />
-+                  </div>
-                 </div>
+@@ -1715,6 +1715,62 @@
+                 <Toggle v-model="form.linuxdo_connect_enabled" />
                </div>
-             </div>
-@@ -8137,6 +8151,7 @@ const form = reactive<SettingsForm>({
+ 
++              <!-- Bypass is always visible so it does not "disappear" when the
++                   LinuxDo master switch is toggled. Credential fields stay gated. -->
++              <div
++                class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
++              >
++                <div class="min-w-0 pr-4">
++                  <label class="font-medium text-gray-900 dark:text-white">{{
++                    t("admin.settings.linuxdo.bypassRegistration")
++                  }}</label>
++                  <p class="text-sm text-gray-500 dark:text-gray-400">
++                    {{
++                      localText(
++                        '仅旁路全局「开放注册」。与「邮箱验证」「第三方注册强制绑定邮箱」正交，不会自动关闭邮箱绑定。LinuxDo 无企业成员限制，开启后任意成功 OAuth 的用户可建号；建议同时开启邀请码。',
++                        'Only bypasses global "Registration Enabled". Independent from Email Verification and "Require email on third-party signup". Warning: LinuxDo has no corporate membership gate; prefer enabling invitation codes as well.',
++                      )
++                    }}
++                  </p>
++                  <p
++                    v-if="!form.linuxdo_connect_enabled"
++                    class="mt-1 text-xs text-amber-600 dark:text-amber-400"
++                  >
++                    {{
++                      localText(
++                        '请先启用 LinuxDo 登录后再修改此开关。此处始终显示当前已保存的状态，避免切换主开关后“消失”。',
++                        'Enable LinuxDo Login first to change this switch. The current saved value is still shown here so it does not disappear.',
++                      )
++                    }}
++                  </p>
++                  <p
++                    v-else-if="form.email_verify_enabled || form.force_email_on_third_party_signup"
++                    class="mt-1 text-xs text-gray-500 dark:text-gray-400"
++                  >
++                    {{
++                      localText(
++                        '注意：当前已开启「邮箱验证」和/或「第三方注册强制绑定邮箱」，因此即使开启本开关，新 LinuxDo 用户仍可能需要绑定真实邮箱。',
++                        'Note: Email Verification and/or "Require email on third-party signup" are on, so new LinuxDo users may still need to bind a real email even with this switch enabled.',
++                      )
++                    }}
++                  </p>
++                </div>
++                <div
++                  class="shrink-0"
++                  :class="!form.linuxdo_connect_enabled ? 'pointer-events-none opacity-50' : ''"
++                  :title="
++                    !form.linuxdo_connect_enabled
++                      ? localText(
++                          '请先启用 LinuxDo 登录后再修改此开关',
++                          'Enable LinuxDo Login before changing this switch',
++                        )
++                      : undefined
++                  "
++                >
++                  <Toggle v-model="form.linuxdo_connect_bypass_registration" />
++                </div>
++              </div>
++
+               <div
+                 v-if="form.linuxdo_connect_enabled"
+                 class="border-t border-gray-100 pt-4 dark:border-dark-700"
+@@ -3373,6 +3429,14 @@
+                   <p class="text-sm text-gray-500 dark:text-gray-400">
+                     {{ t("admin.settings.authSourceDefaults.requireEmailHint") }}
+                   </p>
++                  <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
++                    {{
++                      localText(
++                        '与「邮箱验证」独立：即使关闭邮箱验证，开启本开关时 LinuxDo/OIDC/微信等第三方新用户仍必须绑定真实邮箱。',
++                        'Independent from Email Verification: even when verification is off, enabling this still forces third-party new users (LinuxDo/OIDC/WeChat/etc.) to bind a real email.',
++                      )
++                    }}
++                  </p>
+                 </div>
+                 <Toggle v-model="form.force_email_on_third_party_signup" />
+               </div>
+@@ -8137,6 +8201,7 @@ const form = reactive<SettingsForm>({
    linuxdo_connect_client_secret: "",
    linuxdo_connect_client_secret_configured: false,
    linuxdo_connect_redirect_url: "",
@@ -782,7 +869,7 @@ index 26253c7e..7f29f88a 100644
    // DingTalk Connect OAuth 登录
    dingtalk_connect_enabled: false,
    dingtalk_connect_client_id: "",
-@@ -9452,6 +9467,8 @@ async function saveSettings() {
+@@ -9452,6 +9517,8 @@ async function saveSettings() {
        linuxdo_connect_client_secret:
          form.linuxdo_connect_client_secret || undefined,
        linuxdo_connect_redirect_url: form.linuxdo_connect_redirect_url,
@@ -792,7 +879,7 @@ index 26253c7e..7f29f88a 100644
        dingtalk_connect_client_id: form.dingtalk_connect_client_id,
        dingtalk_connect_client_secret:
 diff --git a/frontend/src/views/admin/__tests__/SettingsView.spec.ts b/frontend/src/views/admin/__tests__/SettingsView.spec.ts
-index 4705e9fa..8bf7057d 100644
+index 4705e9fa..c4ce1f23 100644
 --- a/frontend/src/views/admin/__tests__/SettingsView.spec.ts
 +++ b/frontend/src/views/admin/__tests__/SettingsView.spec.ts
 @@ -346,6 +346,7 @@ const baseSettingsResponse = {
@@ -803,6 +890,31 @@ index 4705e9fa..8bf7057d 100644
    wechat_connect_enabled: true,
    wechat_connect_app_id: "wx-app-id-123",
    wechat_connect_app_secret_configured: true,
+@@ -1299,3 +1300,24 @@ describe("admin SettingsView platform quota matrix", () => {
+     expect(quotas["anthropic"]?.["daily"]).toBe(null);
+   });
+ });
++
++
++describe('admin SettingsView linuxdo bypass registration visibility', () => {
++  it('keeps linuxdo bypass registration control visible when linuxdo is disabled', async () => {
++    getSettings.mockResolvedValueOnce({
++      ...baseSettingsResponse,
++      linuxdo_connect_enabled: false,
++      linuxdo_connect_bypass_registration: true,
++      email_verify_enabled: false,
++      force_email_on_third_party_signup: false,
++    });
++
++    const wrapper = mountView();
++    await flushPromises();
++    await openSecurityTab(wrapper);
++
++    expect(wrapper.text()).toContain('admin.settings.linuxdo.bypassRegistration');
++    // Hint that master switch must be enabled first (shown when disabled)
++    expect(wrapper.text()).toMatch(/Enable LinuxDo Login first|请先启用 LinuxDo/);
++  });
++});
 diff --git a/frontend/src/views/auth/LinuxDoCallbackView.vue b/frontend/src/views/auth/LinuxDoCallbackView.vue
 index fef5b90d..297c9b32 100644
 --- a/frontend/src/views/auth/LinuxDoCallbackView.vue

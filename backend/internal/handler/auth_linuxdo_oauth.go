@@ -499,9 +499,14 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
 	} else if (emailVerificationRequired || forceEmailOnSignup) && compatEmailUser == nil {
 		completionResponse["step"] = "create_account_required"
 		completionResponse["email_binding_required"] = true
-		completionResponse["force_email_on_signup"] = true
+		// force_email_on_signup must reflect the dedicated setting only.
+		// email_verify_enabled also requires binding, but is a different gate.
+		completionResponse["force_email_on_signup"] = forceEmailOnSignup
+		completionResponse["email_verification_required"] = emailVerificationRequired
 		if emailVerificationRequired {
 			completionResponse["choice_reason"] = "email_verification_required"
+		} else if forceEmailOnSignup {
+			completionResponse["choice_reason"] = "force_email_on_signup"
 		}
 		delete(completionResponse, "email")
 		delete(completionResponse, "resolved_email")

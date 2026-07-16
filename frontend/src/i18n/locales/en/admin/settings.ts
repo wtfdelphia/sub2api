@@ -164,7 +164,11 @@ export default {
         redirectUrlSetAndCopied: 'Redirect URL generated and copied to clipboard',
         bypassRegistration: 'Allow LinuxDo Registration',
         bypassRegistrationHint:
-          'Allow users to register via LinuxDo login even when global registration is disabled. Warning: LinuxDo has no corporate membership gate; any user who completes LinuxDo OAuth can create an account. Prefer enabling invitation codes as well.'
+          'Only bypasses global "Registration Enabled". Independent from Email Verification and "Require email on third-party signup". Warning: LinuxDo has no corporate membership gate; any user who completes LinuxDo OAuth can create an account. Prefer enabling invitation codes as well.',
+        bypassRegistrationDisabledHint:
+          'Enable LinuxDo Login first to change this switch. The current saved value is still shown here so it does not disappear.',
+        bypassRegistrationEmailGateHint:
+          'Note: Email Verification and/or "Require email on third-party signup" are on, so new LinuxDo users may still need to bind a real email even with this switch enabled.',
       },
       dingtalk: {
         title: 'DingTalk Login',

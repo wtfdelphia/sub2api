@@ -692,7 +692,9 @@ func TestLinuxDoOAuthCallbackEmailVerificationCompletesWithBoundEmail(t *testing
 	require.True(t, ok)
 	require.Equal(t, "create_account_required", completion["step"])
 	require.Equal(t, true, completion["email_binding_required"])
-	require.Equal(t, true, completion["force_email_on_signup"])
+	// Only email_verify_enabled is on here; do not mislabel as force_email_on_signup.
+	require.Equal(t, false, completion["force_email_on_signup"])
+	require.Equal(t, true, completion["email_verification_required"])
 	require.Equal(t, "email_verification_required", completion["choice_reason"])
 	require.NotContains(t, completion, "email")
 	require.NotContains(t, completion, "resolved_email")
