@@ -1,0 +1,34 @@
+diff --git a/backend/internal/payment/provider/easypay.go b/backend/internal/payment/provider/easypay.go
+index f1c17427..cf393cc8 100644
+--- a/backend/internal/payment/provider/easypay.go
++++ b/backend/internal/payment/provider/easypay.go
+@@ -140,8 +140,12 @@ func (e *EasyPay) createRedirectPayment(req payment.CreatePaymentRequest) (*paym
+ 	params := map[string]string{
+ 		"pid": e.config["pid"], "type": paymentType,
+ 		"out_trade_no": req.OrderID, "notify_url": notifyURL,
+-		"return_url": returnURL, "name": req.Subject,
+-		"money": req.Amount,
++		"name": req.Subject, "money": req.Amount,
++	}
++	// return_url must not exceed 100 chars per easypay spec; omit if too long
++	// to let server use the app-level default notify/return URL.
++	if len(returnURL) <= 100 {
++		params["return_url"] = returnURL
+ 	}
+ 	if cid := e.resolveCID(paymentType); cid != "" {
+ 		params["cid"] = cid
+@@ -167,8 +171,12 @@ func (e *EasyPay) createAPIPayment(ctx context.Context, req payment.CreatePaymen
+ 	params := map[string]string{
+ 		"pid": e.config["pid"], "type": paymentType,
+ 		"out_trade_no": req.OrderID, "notify_url": notifyURL,
+-		"return_url": returnURL, "name": req.Subject,
+-		"money": req.Amount, "clientip": req.ClientIP,
++		"name": req.Subject, "money": req.Amount, "clientip": req.ClientIP,
++	}
++	// return_url must not exceed 100 chars per easypay spec; omit if too long
++	// to let server use the app-level default notify/return URL.
++	if len(returnURL) <= 100 {
++		params["return_url"] = returnURL
+ 	}
+ 	if cid := e.resolveCID(paymentType); cid != "" {
+ 		params["cid"] = cid

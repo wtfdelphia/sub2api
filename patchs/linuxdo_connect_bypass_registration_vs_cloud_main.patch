@@ -1,0 +1,966 @@
+diff --git a/backend/internal/config/config.go b/backend/internal/config/config.go
+index 2064c0c7..168fc25c 100644
+--- a/backend/internal/config/config.go
++++ b/backend/internal/config/config.go
+@@ -244,6 +244,12 @@ type LinuxDoConnectConfig struct {
+ 	UserInfoEmailPath    string `mapstructure:"userinfo_email_path"`
+ 	UserInfoIDPath       string `mapstructure:"userinfo_id_path"`
+ 	UserInfoUsernamePath string `mapstructure:"userinfo_username_path"`
++
++	// BypassRegistration allows LinuxDo OAuth to create new users even when
++	// global registration_enabled is false. Default false. Unlike DingTalk,
++	// LinuxDo has no corp internal_only gate — opening this is equivalent to
++	// allowing any successful LinuxDo OAuth identity to self-register.
++	BypassRegistration bool `mapstructure:"bypass_registration"`
+ }
+ 
+ type WeChatConnectConfig struct {
+@@ -1736,6 +1742,7 @@ func setDefaults() {
+ 	viper.SetDefault("linuxdo_connect.userinfo_email_path", "")
+ 	viper.SetDefault("linuxdo_connect.userinfo_id_path", "")
+ 	viper.SetDefault("linuxdo_connect.userinfo_username_path", "")
++	viper.SetDefault("linuxdo_connect.bypass_registration", false)
+ 
+ 	// WeChat Connect OAuth 登录
+ 	viper.SetDefault("wechat_connect.enabled", false)
+
+diff --git a/backend/internal/handler/admin/setting_handler.go b/backend/internal/handler/admin/setting_handler.go
+index 8355b1f1..84470601 100644
+--- a/backend/internal/handler/admin/setting_handler.go
++++ b/backend/internal/handler/admin/setting_handler.go
+@@ -142,6 +142,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
+ 		LinuxDoConnectClientID:                                 settings.LinuxDoConnectClientID,
+ 		LinuxDoConnectClientSecretConfigured:                   settings.LinuxDoConnectClientSecretConfigured,
+ 		LinuxDoConnectRedirectURL:                              settings.LinuxDoConnectRedirectURL,
++		LinuxDoConnectBypassRegistration:                      settings.LinuxDoConnectBypassRegistration,
+ 		DingTalkConnectEnabled:                                 settings.DingTalkConnectEnabled,
+ 		DingTalkConnectClientID:                                settings.DingTalkConnectClientID,
+ 		DingTalkConnectClientSecretConfigured:                  settings.DingTalkConnectClientSecretConfigured,
+
+diff --git a/backend/internal/handler/admin/setting_handler_audit.go b/backend/internal/handler/admin/setting_handler_audit.go
+index e4fe6262..676e9e7b 100644
+--- a/backend/internal/handler/admin/setting_handler_audit.go
++++ b/backend/internal/handler/admin/setting_handler_audit.go
+@@ -113,6 +113,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
+ 	if before.LinuxDoConnectRedirectURL != after.LinuxDoConnectRedirectURL {
+ 		changed = append(changed, "linuxdo_connect_redirect_url")
+ 	}
++	if before.LinuxDoConnectBypassRegistration != after.LinuxDoConnectBypassRegistration {
++		changed = append(changed, "linuxdo_connect_bypass_registration")
++	}
+ 	if before.DingTalkConnectEnabled != after.DingTalkConnectEnabled {
+ 		changed = append(changed, "dingtalk_connect_enabled")
+ 	}
+
+diff --git a/backend/internal/handler/admin/setting_handler_update.go b/backend/internal/handler/admin/setting_handler_update.go
+index 157bb897..3e36e76b 100644
+--- a/backend/internal/handler/admin/setting_handler_update.go
++++ b/backend/internal/handler/admin/setting_handler_update.go
+@@ -50,10 +50,11 @@ type UpdateSettingsRequest struct {
+ 	APIKeyACLTrustForwardedIP *bool `json:"api_key_acl_trust_forwarded_ip"`
+ 
+ 	// LinuxDo Connect OAuth 登录
+-	LinuxDoConnectEnabled      bool   `json:"linuxdo_connect_enabled"`
+-	LinuxDoConnectClientID     string `json:"linuxdo_connect_client_id"`
+-	LinuxDoConnectClientSecret string `json:"linuxdo_connect_client_secret"`
+-	LinuxDoConnectRedirectURL  string `json:"linuxdo_connect_redirect_url"`
++	LinuxDoConnectEnabled              bool   `json:"linuxdo_connect_enabled"`
++	LinuxDoConnectClientID             string `json:"linuxdo_connect_client_id"`
++	LinuxDoConnectClientSecret         string `json:"linuxdo_connect_client_secret"`
++	LinuxDoConnectRedirectURL          string `json:"linuxdo_connect_redirect_url"`
++	LinuxDoConnectBypassRegistration   bool   `json:"linuxdo_connect_bypass_registration"`
+ 
+ 	// DingTalk Connect OAuth 登录
+ 	DingTalkConnectEnabled                 bool   `json:"dingtalk_connect_enabled"`
+@@ -1200,6 +1201,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
+ 		LinuxDoConnectClientID:                 req.LinuxDoConnectClientID,
+ 		LinuxDoConnectClientSecret:             req.LinuxDoConnectClientSecret,
+ 		LinuxDoConnectRedirectURL:              req.LinuxDoConnectRedirectURL,
++		LinuxDoConnectBypassRegistration:       req.LinuxDoConnectBypassRegistration,
+ 		DingTalkConnectEnabled:                 req.DingTalkConnectEnabled,
+ 		DingTalkConnectClientID:                req.DingTalkConnectClientID,
+ 		DingTalkConnectClientSecret:            req.DingTalkConnectClientSecret,
+@@ -1708,6 +1710,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
+ 		LinuxDoConnectClientID:                                 updatedSettings.LinuxDoConnectClientID,
+ 		LinuxDoConnectClientSecretConfigured:                   updatedSettings.LinuxDoConnectClientSecretConfigured,
+ 		LinuxDoConnectRedirectURL:                              updatedSettings.LinuxDoConnectRedirectURL,
++		LinuxDoConnectBypassRegistration:                      updatedSettings.LinuxDoConnectBypassRegistration,
+ 		DingTalkConnectEnabled:                                 updatedSettings.DingTalkConnectEnabled,
+ 		DingTalkConnectClientID:                                updatedSettings.DingTalkConnectClientID,
+ 		DingTalkConnectClientSecretConfigured:                  updatedSettings.DingTalkConnectClientSecretConfigured,
+
+diff --git a/backend/internal/handler/auth_linuxdo_oauth.go b/backend/internal/handler/auth_linuxdo_oauth.go
+index 92720495..0c39a5bd 100644
+--- a/backend/internal/handler/auth_linuxdo_oauth.go
++++ b/backend/internal/handler/auth_linuxdo_oauth.go
+@@ -326,7 +326,26 @@ func (h *AuthHandler) LinuxDoOAuthCallback(c *gin.Context) {
+ 	}
+ 	emailVerificationRequired := h != nil && h.authService != nil && h.authService.IsEmailVerifyEnabled(c.Request.Context())
+ 	forceEmailOnSignup := h.isForceEmailOnThirdPartySignup(c.Request.Context())
++	signupBlocked := h.isLinuxDoSignupBlocked(c.Request.Context())
+ 	if compatEmailUser == nil && !emailVerificationRequired && !forceEmailOnSignup {
++		if signupBlocked {
++			// 注册关闭且未开启 LinuxDo 注册旁路：不要尝试建号，直接引导绑定已有账号。
++			if err := h.createOAuthPendingSession(c, oauthPendingSessionPayload{
++				Intent:                 oauthIntentLogin,
++				Identity:               identityKey,
++				TargetUserID:           nil,
++				ResolvedEmail:          "",
++				RedirectTo:             redirectTo,
++				BrowserSessionKey:      browserSessionKey,
++				UpstreamIdentityClaims: upstreamClaims,
++				CompletionResponse:     linuxDoBindLoginCompletionResponse(redirectTo),
++			}); err != nil {
++				redirectOAuthError(c, frontendCallback, "session_error", "failed to continue oauth login", "")
++				return
++			}
++			redirectToFrontendCallback(c, frontendCallback)
++			return
++		}
+ 		if err := h.ensureBackendModeAllowsNewUserLogin(c.Request.Context()); err != nil {
+ 			redirectOAuthError(c, frontendCallback, "session_error", infraerrors.Reason(err), infraerrors.Message(err))
+ 			return
+@@ -385,6 +404,7 @@ func (h *AuthHandler) LinuxDoOAuthCallback(c *gin.Context) {
+ 		compatEmailUser,
+ 		emailVerificationRequired,
+ 		forceEmailOnSignup,
++		signupBlocked,
+ 	); err != nil {
+ 		redirectOAuthError(c, frontendCallback, "session_error", "failed to continue oauth login", "")
+ 		return
+@@ -436,6 +456,7 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
+ 	compatEmailUser *dbent.User,
+ 	emailVerificationRequired bool,
+ 	forceEmailOnSignup bool,
++	signupBlocked bool,
+ ) error {
+ 	suggestionEmail := strings.TrimSpace(suggestedEmail)
+ 	canonicalEmail := strings.TrimSpace(resolvedEmail)
+@@ -451,7 +472,7 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
+ 		"resolved_email":            canonicalEmail,
+ 		"existing_account_email":    "",
+ 		"existing_account_bindable": false,
+-		"create_account_allowed":    true,
++		"create_account_allowed":    !signupBlocked,
+ 		"force_email_on_signup":     forceEmailOnSignup,
+ 		"choice_reason":             "third_party_signup",
+ 	}
+@@ -469,7 +490,13 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
+ 	if forceEmailOnSignup && compatEmailUser == nil {
+ 		completionResponse["choice_reason"] = "force_email_on_signup"
+ 	}
+-	if (emailVerificationRequired || forceEmailOnSignup) && compatEmailUser == nil {
++	// 注册被拦：直接 bind_login，避免展示「创建新账户」或补邮箱表单后才失败。
++	if signupBlocked {
++		completionResponse["step"] = "bind_login_required"
++		completionResponse["existing_account_bindable"] = true
++		completionResponse["create_account_allowed"] = false
++		completionResponse["choice_reason"] = "signup_blocked_redirect_to_bind"
++	} else if (emailVerificationRequired || forceEmailOnSignup) && compatEmailUser == nil {
+ 		completionResponse["step"] = "create_account_required"
+ 		completionResponse["email_binding_required"] = true
+ 		completionResponse["force_email_on_signup"] = true
+@@ -498,6 +525,32 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
+ 	})
+ }
+ 
++// isLinuxDoSignupBlocked 当注册总开关关闭且未开启 LinuxDo 注册旁路时返回 true。
++// 镜像 isDingTalkSignupBlocked / canBypassRegistrationDisabledForOAuth("linuxdo")。
++// settingSvc 为空或配置读取失败时 fail-closed（返回 true）。
++func (h *AuthHandler) isLinuxDoSignupBlocked(ctx context.Context) bool {
++	if h == nil || h.settingSvc == nil {
++		return true
++	}
++	if h.settingSvc.IsRegistrationEnabled(ctx) {
++		return false
++	}
++	enabled, bypass, err := h.settingSvc.GetLinuxDoConnectRegistrationBypass(ctx)
++	if err != nil || !enabled || !bypass {
++		return true
++	}
++	return false
++}
++
++func linuxDoBindLoginCompletionResponse(redirectTo string) map[string]any {
++	return map[string]any{
++		"step":                      "bind_login_required",
++		"existing_account_bindable": true,
++		"create_account_allowed":    false,
++		"redirect":                  redirectTo,
++	}
++}
++
+ type completeLinuxDoOAuthRequest struct {
+ 	InvitationCode   string `json:"invitation_code" binding:"required"`
+ 	AffCode          string `json:"aff_code,omitempty"`
+
+diff --git a/backend/internal/handler/auth_linuxdo_oauth_test.go b/backend/internal/handler/auth_linuxdo_oauth_test.go
+index 1de9a132..4d6388f0 100644
+--- a/backend/internal/handler/auth_linuxdo_oauth_test.go
++++ b/backend/internal/handler/auth_linuxdo_oauth_test.go
+@@ -1223,14 +1223,91 @@ func newLinuxDoOAuthHandlerAndClientWithEmailVerification(
+ }
+ 
+ func configureLinuxDoOAuthTestHandler(handler *AuthHandler, oauthCfg config.LinuxDoConnectConfig) {
+-	handler.settingSvc = nil
+-	handler.cfg = &config.Config{
+-		JWT: config.JWTConfig{
+-			Secret:                   "test-secret",
+-			ExpireHour:               1,
+-			AccessTokenExpireMinutes: 60,
+-			RefreshTokenExpireDays:   7,
+-		},
+-		LinuxDo: oauthCfg,
++	// Keep settingSvc so registration / invitation / bypass checks stay functional.
++	// Inject LinuxDo OAuth config into handler.cfg only; settingSvc falls back to the same cfg pointer.
++	if handler.cfg == nil {
++		handler.cfg = &config.Config{
++			JWT: config.JWTConfig{
++				Secret:                   "test-secret",
++				ExpireHour:               1,
++				AccessTokenExpireMinutes: 60,
++				RefreshTokenExpireDays:   7,
++			},
++		}
+ 	}
++	handler.cfg.LinuxDo = oauthCfg
++}
++
++func TestIsLinuxDoSignupBlocked(t *testing.T) {
++	t.Parallel()
++
++	t.Run("settingSvc nil -> fail-closed blocked", func(t *testing.T) {
++		h := &AuthHandler{}
++		require.True(t, h.isLinuxDoSignupBlocked(context.Background()))
++	})
++
++	t.Run("registration enabled -> not blocked", func(t *testing.T) {
++		handler, _ := newOAuthPendingFlowTestHandler(t, false)
++		require.False(t, handler.isLinuxDoSignupBlocked(context.Background()))
++	})
++
++	t.Run("registration disabled + bypass off -> blocked", func(t *testing.T) {
++		ld := config.LinuxDoConnectConfig{
++			Enabled:             true,
++			ClientID:            "linuxdo-client",
++			ClientSecret:        "linuxdo-secret",
++			AuthorizeURL:        "https://connect.linux.do/oauth2/authorize",
++			TokenURL:            "https://connect.linux.do/oauth2/token",
++			UserInfoURL:         "https://connect.linux.do/api/user",
++			RedirectURL:         "https://example.com/api/v1/auth/oauth/linuxdo/callback",
++			FrontendRedirectURL: "/auth/linuxdo/callback",
++			TokenAuthMethod:     "client_secret_post",
++			BypassRegistration:  false,
++		}
++		handler := &AuthHandler{
++			cfg: &config.Config{LinuxDo: ld},
++			settingSvc: service.NewSettingService(
++				&oauthPendingFlowSettingRepoStub{values: map[string]string{
++					service.SettingKeyRegistrationEnabled:              "false",
++					service.SettingKeyLinuxDoConnectEnabled:            "true",
++					service.SettingKeyLinuxDoConnectBypassRegistration: "false",
++					service.SettingKeyLinuxDoConnectClientID:           "linuxdo-client",
++					service.SettingKeyLinuxDoConnectClientSecret:       "linuxdo-secret",
++					service.SettingKeyLinuxDoConnectRedirectURL:        "https://example.com/api/v1/auth/oauth/linuxdo/callback",
++				}},
++				&config.Config{LinuxDo: ld},
++			),
++		}
++		require.True(t, handler.isLinuxDoSignupBlocked(context.Background()))
++	})
++
++	t.Run("registration disabled + bypass on -> not blocked", func(t *testing.T) {
++		ld := config.LinuxDoConnectConfig{
++			Enabled:             true,
++			ClientID:            "linuxdo-client",
++			ClientSecret:        "linuxdo-secret",
++			AuthorizeURL:        "https://connect.linux.do/oauth2/authorize",
++			TokenURL:            "https://connect.linux.do/oauth2/token",
++			UserInfoURL:         "https://connect.linux.do/api/user",
++			RedirectURL:         "https://example.com/api/v1/auth/oauth/linuxdo/callback",
++			FrontendRedirectURL: "/auth/linuxdo/callback",
++			TokenAuthMethod:     "client_secret_post",
++			BypassRegistration:  true,
++		}
++		handler := &AuthHandler{
++			cfg: &config.Config{LinuxDo: ld},
++			settingSvc: service.NewSettingService(
++				&oauthPendingFlowSettingRepoStub{values: map[string]string{
++					service.SettingKeyRegistrationEnabled:              "false",
++					service.SettingKeyLinuxDoConnectEnabled:            "true",
++					service.SettingKeyLinuxDoConnectBypassRegistration: "true",
++					service.SettingKeyLinuxDoConnectClientID:           "linuxdo-client",
++					service.SettingKeyLinuxDoConnectClientSecret:       "linuxdo-secret",
++					service.SettingKeyLinuxDoConnectRedirectURL:        "https://example.com/api/v1/auth/oauth/linuxdo/callback",
++				}},
++				&config.Config{LinuxDo: ld},
++			),
++		}
++		require.False(t, handler.isLinuxDoSignupBlocked(context.Background()))
++	})
+ }
+
+diff --git a/backend/internal/handler/auth_oauth_pending_flow_test.go b/backend/internal/handler/auth_oauth_pending_flow_test.go
+index 53360036..ef2c82b3 100644
+--- a/backend/internal/handler/auth_oauth_pending_flow_test.go
++++ b/backend/internal/handler/auth_oauth_pending_flow_test.go
+@@ -2503,6 +2503,7 @@ CREATE TABLE IF NOT EXISTS user_affiliates (
+ 	}
+ 
+ 	return &AuthHandler{
++		cfg:          cfg,
+ 		authService:  authSvc,
+ 		userService:  userSvc,
+ 		settingSvc:   settingSvc,
+
+diff --git a/backend/internal/handler/dto/settings.go b/backend/internal/handler/dto/settings.go
+index 4678c730..bb6872bc 100644
+--- a/backend/internal/handler/dto/settings.go
++++ b/backend/internal/handler/dto/settings.go
+@@ -58,6 +58,7 @@ type SystemSettings struct {
+ 	LinuxDoConnectClientID               string `json:"linuxdo_connect_client_id"`
+ 	LinuxDoConnectClientSecretConfigured bool   `json:"linuxdo_connect_client_secret_configured"`
+ 	LinuxDoConnectRedirectURL            string `json:"linuxdo_connect_redirect_url"`
++	LinuxDoConnectBypassRegistration     bool   `json:"linuxdo_connect_bypass_registration"`
+ 
+ 	DingTalkConnectEnabled                 bool   `json:"dingtalk_connect_enabled"`
+ 	DingTalkConnectClientID                string `json:"dingtalk_connect_client_id"`
+
+diff --git a/backend/internal/server/api_contract_test.go b/backend/internal/server/api_contract_test.go
+index 29b8ac37..0875da3b 100644
+--- a/backend/internal/server/api_contract_test.go
++++ b/backend/internal/server/api_contract_test.go
+@@ -729,6 +729,7 @@ func TestAPIContracts(t *testing.T) {
+ 						"linuxdo_connect_client_id": "",
+ 						"linuxdo_connect_client_secret_configured": false,
+ 						"linuxdo_connect_redirect_url": "",
++						"linuxdo_connect_bypass_registration": false,
+ 						"dingtalk_connect_enabled": false,
+ 						"dingtalk_connect_bypass_registration": false,
+ 						"dingtalk_connect_client_id": "",
+@@ -1037,6 +1038,7 @@ func TestAPIContracts(t *testing.T) {
+ 					"linuxdo_connect_client_id": "",
+ 					"linuxdo_connect_client_secret_configured": false,
+ 					"linuxdo_connect_redirect_url": "",
++					"linuxdo_connect_bypass_registration": false,
+ 					"dingtalk_connect_enabled": false,
+ 					"dingtalk_connect_bypass_registration": false,
+ 					"dingtalk_connect_client_id": "",
+
+diff --git a/backend/internal/service/auth_service.go b/backend/internal/service/auth_service.go
+index a4c67a24..051f3a34 100644
+--- a/backend/internal/service/auth_service.go
++++ b/backend/internal/service/auth_service.go
+@@ -568,17 +568,31 @@ func (s *AuthService) LoginOrRegisterOAuth(ctx context.Context, email, username
+ 	return token, user, nil
+ }
+ 
+-// canBypassRegistrationDisabledForOAuth 在钉钉企业模式（internal_only）且
+-// dingtalk_connect_bypass_registration=true 时，允许跳过全局 registration_enabled 检查。
++// canBypassRegistrationDisabledForOAuth 在指定 OAuth 渠道开启「绕过开放注册」时，
++// 允许跳过全局 registration_enabled 检查。
++//
++// - dingtalk：需 bypass_registration=true 且 corp_restriction_policy=internal_only
++// - linuxdo：需 bypass_registration=true（无企业 corp 门；开启即允许该渠道自助建号）
+ func (s *AuthService) canBypassRegistrationDisabledForOAuth(ctx context.Context, signupSource string) bool {
+-	if signupSource != "dingtalk" {
++	if s == nil || s.settingService == nil {
+ 		return false
+ 	}
+-	cfg, err := s.settingService.GetDingTalkConnectOAuthConfig(ctx)
+-	if err != nil || !cfg.Enabled || !cfg.BypassRegistration {
++	switch signupSource {
++	case "dingtalk":
++		cfg, err := s.settingService.GetDingTalkConnectOAuthConfig(ctx)
++		if err != nil || !cfg.Enabled || !cfg.BypassRegistration {
++			return false
++		}
++		return cfg.CorpRestrictionPolicy == "internal_only"
++	case "linuxdo":
++		enabled, bypass, err := s.settingService.GetLinuxDoConnectRegistrationBypass(ctx)
++		if err != nil || !enabled || !bypass {
++			return false
++		}
++		return true
++	default:
+ 		return false
+ 	}
+-	return cfg.CorpRestrictionPolicy == "internal_only"
+ }
+ 
+ // LoginOrRegisterOAuthWithTokenPair 用于第三方 OAuth/SSO 登录，返回完整的 TokenPair。
+
+diff --git a/backend/internal/service/auth_service_register_test.go b/backend/internal/service/auth_service_register_test.go
+index 2ee9f21a..9f30075d 100644
+--- a/backend/internal/service/auth_service_register_test.go
++++ b/backend/internal/service/auth_service_register_test.go
+@@ -760,6 +760,17 @@ func newAuthServiceWithDingTalkCfg(settings map[string]string, dtCfg config.Ding
+ 	return NewAuthService(nil, nil, nil, nil, cfg, settingService, nil, nil, nil, nil, nil, nil, nil)
+ }
+ 
++// newAuthServiceWithLinuxDoCfg builds AuthService with LinuxDo Connect config for canBypass tests.
++func newAuthServiceWithLinuxDoCfg(settings map[string]string, ldCfg config.LinuxDoConnectConfig) *AuthService {
++	cfg := &config.Config{
++		JWT:     config.JWTConfig{Secret: "test-secret", ExpireHour: 1},
++		Default: config.DefaultConfig{UserBalance: 3.5, UserConcurrency: 2},
++		LinuxDo: ldCfg,
++	}
++	settingService := NewSettingService(&settingRepoStub{values: settings}, cfg)
++	return NewAuthService(nil, nil, nil, nil, cfg, settingService, nil, nil, nil, nil, nil, nil, nil)
++}
++
+ // minDingTalkURLs 返回一个包含必填字段的基础 DingTalkConnectConfig（不设 Enabled/BypassRegistration/Policy）。
+ func minDingTalkURLs() config.DingTalkConnectConfig {
+ 	return config.DingTalkConnectConfig{
+@@ -775,6 +786,20 @@ func minDingTalkURLs() config.DingTalkConnectConfig {
+ 	}
+ }
+ 
++// minLinuxDoURLs returns a valid LinuxDoConnectConfig base (without Enabled/BypassRegistration).
++func minLinuxDoURLs() config.LinuxDoConnectConfig {
++	return config.LinuxDoConnectConfig{
++		ClientID:            "linuxdo-client",
++		ClientSecret:        "linuxdo-secret",
++		AuthorizeURL:        "https://connect.linux.do/oauth2/authorize",
++		TokenURL:            "https://connect.linux.do/oauth2/token",
++		UserInfoURL:         "https://connect.linux.do/api/user",
++		RedirectURL:         "https://example.com/api/v1/auth/oauth/linuxdo/callback",
++		FrontendRedirectURL: "/auth/linuxdo/callback",
++		TokenAuthMethod:     "client_secret_post",
++	}
++}
++
+ func TestCanBypassRegistrationDisabledForOAuth(t *testing.T) {
+ 	cases := []struct {
+ 		name         string
+@@ -784,7 +809,7 @@ func TestCanBypassRegistrationDisabledForOAuth(t *testing.T) {
+ 		want         bool
+ 	}{
+ 		{
+-			name:         "non-dingtalk source → false",
++			name:         "non-dingtalk source without linuxdo bypass → false",
+ 			signupSource: "linuxdo",
+ 			settings:     map[string]string{},
+ 			dtCfg:        minDingTalkURLs(),
+@@ -842,4 +867,46 @@ func TestCanBypassRegistrationDisabledForOAuth(t *testing.T) {
+ 			require.Equal(t, tc.want, got)
+ 		})
+ 	}
++
++	linuxDoCases := []struct {
++		name     string
++		settings map[string]string
++		ldCfg    config.LinuxDoConnectConfig
++		want     bool
++	}{
++		{
++			name: "linuxdo enabled but bypass=false → false",
++			settings: map[string]string{
++				SettingKeyLinuxDoConnectEnabled:            "true",
++				SettingKeyLinuxDoConnectBypassRegistration: "false",
++			},
++			ldCfg: minLinuxDoURLs(),
++			want:  false,
++		},
++		{
++			name: "linuxdo disabled + bypass=true → false",
++			settings: map[string]string{
++				SettingKeyLinuxDoConnectEnabled:            "false",
++				SettingKeyLinuxDoConnectBypassRegistration: "true",
++			},
++			ldCfg: minLinuxDoURLs(),
++			want:  false,
++		},
++		{
++			name: "linuxdo enabled + bypass=true → true",
++			settings: map[string]string{
++				SettingKeyLinuxDoConnectEnabled:            "true",
++				SettingKeyLinuxDoConnectBypassRegistration: "true",
++			},
++			ldCfg: minLinuxDoURLs(),
++			want:  true,
++		},
++	}
++	for _, tc := range linuxDoCases {
++		t.Run(tc.name, func(t *testing.T) {
++			svc := newAuthServiceWithLinuxDoCfg(tc.settings, tc.ldCfg)
++			got := svc.canBypassRegistrationDisabledForOAuth(context.Background(), "linuxdo")
++			require.Equal(t, tc.want, got)
++		})
++	}
+ }
+
+diff --git a/backend/internal/service/domain_constants.go b/backend/internal/service/domain_constants.go
+index 44631e3f..7199a76d 100644
+--- a/backend/internal/service/domain_constants.go
++++ b/backend/internal/service/domain_constants.go
+@@ -170,10 +170,11 @@ const (
+ 	SettingKeyTotpEnabled = "totp_enabled" // 是否启用 TOTP 2FA 功能
+ 
+ 	// LinuxDo Connect OAuth 登录设置
+-	SettingKeyLinuxDoConnectEnabled      = "linuxdo_connect_enabled"
+-	SettingKeyLinuxDoConnectClientID     = "linuxdo_connect_client_id"
+-	SettingKeyLinuxDoConnectClientSecret = "linuxdo_connect_client_secret"
+-	SettingKeyLinuxDoConnectRedirectURL  = "linuxdo_connect_redirect_url"
++	SettingKeyLinuxDoConnectEnabled            = "linuxdo_connect_enabled"
++	SettingKeyLinuxDoConnectClientID           = "linuxdo_connect_client_id"
++	SettingKeyLinuxDoConnectClientSecret       = "linuxdo_connect_client_secret"
++	SettingKeyLinuxDoConnectRedirectURL        = "linuxdo_connect_redirect_url"
++	SettingKeyLinuxDoConnectBypassRegistration = "linuxdo_connect_bypass_registration"
+ 
+ 	// DingTalk Connect OAuth 登录设置
+ 	SettingKeyDingTalkConnectEnabled                 = "dingtalk_connect_enabled"
+
+diff --git a/backend/internal/service/setting_oauth.go b/backend/internal/service/setting_oauth.go
+index cb717c77..757efd49 100644
+--- a/backend/internal/service/setting_oauth.go
++++ b/backend/internal/service/setting_oauth.go
+@@ -485,6 +485,7 @@ func (s *SettingService) GetLinuxDoConnectOAuthConfig(ctx context.Context) (conf
+ 		SettingKeyLinuxDoConnectClientID,
+ 		SettingKeyLinuxDoConnectClientSecret,
+ 		SettingKeyLinuxDoConnectRedirectURL,
++		SettingKeyLinuxDoConnectBypassRegistration,
+ 	}
+ 	settings, err := s.settingRepo.GetMultiple(ctx, keys)
+ 	if err != nil {
+@@ -503,6 +504,9 @@ func (s *SettingService) GetLinuxDoConnectOAuthConfig(ctx context.Context) (conf
+ 	if v, ok := settings[SettingKeyLinuxDoConnectRedirectURL]; ok && strings.TrimSpace(v) != "" {
+ 		effective.RedirectURL = strings.TrimSpace(v)
+ 	}
++	if raw, ok := settings[SettingKeyLinuxDoConnectBypassRegistration]; ok && strings.TrimSpace(raw) != "" {
++		effective.BypassRegistration = strings.EqualFold(strings.TrimSpace(raw), "true")
++	}
+ 	if !effective.Enabled {
+ 		return config.LinuxDoConnectConfig{}, infraerrors.NotFound("OAUTH_DISABLED", "oauth login is disabled")
+ 	}
+@@ -557,6 +561,34 @@ func (s *SettingService) GetLinuxDoConnectOAuthConfig(ctx context.Context) (conf
+ 	return effective, nil
+ }
+ 
++// GetLinuxDoConnectRegistrationBypass returns whether LinuxDo OAuth may create users
++// while global registration is disabled. Unlike GetLinuxDoConnectOAuthConfig, this does
++// not require full OAuth endpoint validity — it only merges enabled + bypass flags.
++func (s *SettingService) GetLinuxDoConnectRegistrationBypass(ctx context.Context) (enabled bool, bypass bool, err error) {
++	if s == nil || s.cfg == nil {
++		return false, false, infraerrors.ServiceUnavailable("CONFIG_NOT_READY", "config not loaded")
++	}
++	enabled = s.cfg.LinuxDo.Enabled
++	bypass = s.cfg.LinuxDo.BypassRegistration
++	if s.settingRepo == nil {
++		return enabled, bypass, nil
++	}
++	settings, err := s.settingRepo.GetMultiple(ctx, []string{
++		SettingKeyLinuxDoConnectEnabled,
++		SettingKeyLinuxDoConnectBypassRegistration,
++	})
++	if err != nil {
++		return false, false, fmt.Errorf("get linuxdo bypass settings: %w", err)
++	}
++	if raw, ok := settings[SettingKeyLinuxDoConnectEnabled]; ok {
++		enabled = raw == "true"
++	}
++	if raw, ok := settings[SettingKeyLinuxDoConnectBypassRegistration]; ok && strings.TrimSpace(raw) != "" {
++		bypass = strings.EqualFold(strings.TrimSpace(raw), "true")
++	}
++	return enabled, bypass, nil
++}
++
+ // GetDingTalkConnectOAuthConfig 返回用于登录的"最终生效" DingTalk Connect 配置。
+ //
+ // 优先级：
+
+diff --git a/backend/internal/service/setting_parse.go b/backend/internal/service/setting_parse.go
+index 1ffbf4c8..2d900d8b 100644
+--- a/backend/internal/service/setting_parse.go
++++ b/backend/internal/service/setting_parse.go
+@@ -372,6 +372,12 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
+ 	}
+ 	result.LinuxDoConnectClientSecretConfigured = result.LinuxDoConnectClientSecret != ""
+ 
++	if raw, ok := settings[SettingKeyLinuxDoConnectBypassRegistration]; ok && strings.TrimSpace(raw) != "" {
++		result.LinuxDoConnectBypassRegistration = strings.EqualFold(strings.TrimSpace(raw), "true")
++	} else {
++		result.LinuxDoConnectBypassRegistration = linuxDoBase.BypassRegistration
++	}
++
+ 	// DingTalk Connect 设置：
+ 	// - 兼容 config.yaml/env
+ 	// - 支持后台系统设置覆盖并持久化（存储于 DB）
+
+diff --git a/backend/internal/service/setting_update.go b/backend/internal/service/setting_update.go
+index d50a7b12..fe2f8a6d 100644
+--- a/backend/internal/service/setting_update.go
++++ b/backend/internal/service/setting_update.go
+@@ -161,6 +161,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
+ 	if settings.LinuxDoConnectClientSecret != "" {
+ 		updates[SettingKeyLinuxDoConnectClientSecret] = settings.LinuxDoConnectClientSecret
+ 	}
++	updates[SettingKeyLinuxDoConnectBypassRegistration] = strconv.FormatBool(settings.LinuxDoConnectBypassRegistration)
+ 
+ 	// DingTalk Connect OAuth 登录
+ 	updates[SettingKeyDingTalkConnectEnabled] = strconv.FormatBool(settings.DingTalkConnectEnabled)
+
+diff --git a/backend/internal/service/settings_view.go b/backend/internal/service/settings_view.go
+index 7e15a1a4..9c1fe8d3 100644
+--- a/backend/internal/service/settings_view.go
++++ b/backend/internal/service/settings_view.go
+@@ -46,6 +46,7 @@ type SystemSettings struct {
+ 	LinuxDoConnectClientSecret           string
+ 	LinuxDoConnectClientSecretConfigured bool
+ 	LinuxDoConnectRedirectURL            string
++	LinuxDoConnectBypassRegistration     bool
+ 
+ 	// DingTalk Connect OAuth 登录
+ 	DingTalkConnectEnabled                 bool
+
+diff --git a/deploy/config.example.yaml b/deploy/config.example.yaml
+index 93fa6a2b..edaecdbb 100644
+--- a/deploy/config.example.yaml
++++ b/deploy/config.example.yaml
+@@ -952,6 +952,9 @@ linuxdo_connect:
+   userinfo_email_path: ""
+   userinfo_id_path: ""
+   userinfo_username_path: ""
++  # 开放 LinuxDo 注册：即使全局「开放注册」关闭，仍允许通过 LinuxDo 登录创建账号。
++  # 默认 false。LinuxDo 无企业 corp 限制，开启前请评估风险；建议同时开启「邀请码注册」。
++  bypass_registration: false
+ 
+ # =============================================================================
+ # Generic OIDC OAuth Login (SSO)
+
+diff --git a/frontend/src/api/admin/settings.ts b/frontend/src/api/admin/settings.ts
+index 4a3933fe..37e72d8c 100644
+--- a/frontend/src/api/admin/settings.ts
++++ b/frontend/src/api/admin/settings.ts
+@@ -458,6 +458,7 @@ export interface SystemSettings {
+   linuxdo_connect_client_id: string;
+   linuxdo_connect_client_secret_configured: boolean;
+   linuxdo_connect_redirect_url: string;
++  linuxdo_connect_bypass_registration: boolean;
+ 
+   // DingTalk Connect OAuth settings
+   dingtalk_connect_enabled: boolean;
+@@ -751,6 +752,7 @@ export interface UpdateSettingsRequest {
+   linuxdo_connect_client_id?: string;
+   linuxdo_connect_client_secret?: string;
+   linuxdo_connect_redirect_url?: string;
++  linuxdo_connect_bypass_registration?: boolean;
+   dingtalk_connect_enabled?: boolean;
+   dingtalk_connect_client_id?: string;
+   dingtalk_connect_client_secret?: string;
+
+diff --git a/frontend/src/i18n/locales/en/admin/settings.ts b/frontend/src/i18n/locales/en/admin/settings.ts
+index 4a12c0be..e9c28492 100644
+--- a/frontend/src/i18n/locales/en/admin/settings.ts
++++ b/frontend/src/i18n/locales/en/admin/settings.ts
+@@ -163,7 +163,10 @@ export default {
+         redirectUrlHint:
+           'Must match the redirect URL configured in Connect.Linux.Do (must be an absolute http(s) URL)',
+         quickSetCopy: 'Generate & Copy (current site)',
+-        redirectUrlSetAndCopied: 'Redirect URL generated and copied to clipboard'
++        redirectUrlSetAndCopied: 'Redirect URL generated and copied to clipboard',
++        bypassRegistration: 'Allow LinuxDo Registration',
++        bypassRegistrationHint:
++          'Allow users to register via LinuxDo login even when global registration is disabled. Warning: LinuxDo has no corporate membership gate; any user who completes LinuxDo OAuth can create an account. Prefer enabling invitation codes as well.'
+       },
+       dingtalk: {
+         title: 'DingTalk Login',
+
+diff --git a/frontend/src/i18n/locales/zh/admin/settings.ts b/frontend/src/i18n/locales/zh/admin/settings.ts
+index 2dab9732..06ce2de4 100644
+--- a/frontend/src/i18n/locales/zh/admin/settings.ts
++++ b/frontend/src/i18n/locales/zh/admin/settings.ts
+@@ -162,7 +162,10 @@ export default {
+         redirectUrlPlaceholder: 'https://your-domain.com/api/v1/auth/oauth/linuxdo/callback',
+         redirectUrlHint: '需与 Connect.Linux.Do 中配置的回调地址一致（必须是 http(s) 完整 URL）',
+         quickSetCopy: '使用当前站点生成并复制',
+-        redirectUrlSetAndCopied: '已使用当前站点生成回调地址并复制到剪贴板'
++        redirectUrlSetAndCopied: '已使用当前站点生成回调地址并复制到剪贴板',
++        bypassRegistration: '开放 LinuxDo 注册',
++        bypassRegistrationHint:
++          '即使「开放注册」关闭时也可以通过 LinuxDo 登录来注册。注意：LinuxDo 无企业成员限制，开启后任意成功完成 OAuth 的 LinuxDo 用户均可建号；建议同时开启邀请码。'
+       },
+       dingtalk: {
+         title: '钉钉登录',
+
+diff --git a/frontend/src/views/admin/SettingsView.vue b/frontend/src/views/admin/SettingsView.vue
+index 8b1df9d3..fedc693a 100644
+--- a/frontend/src/views/admin/SettingsView.vue
++++ b/frontend/src/views/admin/SettingsView.vue
+@@ -1803,6 +1803,20 @@
+                       {{ t("admin.settings.linuxdo.redirectUrlHint") }}
+                     </p>
+                   </div>
++
++                  <div
++                    class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
++                  >
++                    <div>
++                      <label class="font-medium text-gray-900 dark:text-white">{{
++                        t("admin.settings.linuxdo.bypassRegistration")
++                      }}</label>
++                      <p class="text-sm text-gray-500 dark:text-gray-400">
++                        {{ t("admin.settings.linuxdo.bypassRegistrationHint") }}
++                      </p>
++                    </div>
++                    <Toggle v-model="form.linuxdo_connect_bypass_registration" />
++                  </div>
+                 </div>
+               </div>
+             </div>
+@@ -8150,6 +8164,7 @@ const form = reactive<SettingsForm>({
+   linuxdo_connect_client_secret: "",
+   linuxdo_connect_client_secret_configured: false,
+   linuxdo_connect_redirect_url: "",
++  linuxdo_connect_bypass_registration: false,
+   // DingTalk Connect OAuth 登录
+   dingtalk_connect_enabled: false,
+   dingtalk_connect_client_id: "",
+@@ -9466,6 +9481,8 @@ async function saveSettings() {
+       linuxdo_connect_client_secret:
+         form.linuxdo_connect_client_secret || undefined,
+       linuxdo_connect_redirect_url: form.linuxdo_connect_redirect_url,
++      linuxdo_connect_bypass_registration:
++        form.linuxdo_connect_bypass_registration,
+       dingtalk_connect_enabled: form.dingtalk_connect_enabled,
+       dingtalk_connect_client_id: form.dingtalk_connect_client_id,
+       dingtalk_connect_client_secret:
+
+diff --git a/frontend/src/views/admin/__tests__/SettingsView.spec.ts b/frontend/src/views/admin/__tests__/SettingsView.spec.ts
+index 7e9b5cdc..68053c99 100644
+--- a/frontend/src/views/admin/__tests__/SettingsView.spec.ts
++++ b/frontend/src/views/admin/__tests__/SettingsView.spec.ts
+@@ -346,6 +346,7 @@ const baseSettingsResponse = {
+   linuxdo_connect_client_id: "",
+   linuxdo_connect_client_secret_configured: false,
+   linuxdo_connect_redirect_url: "",
++  linuxdo_connect_bypass_registration: false,
+   wechat_connect_enabled: true,
+   wechat_connect_app_id: "wx-app-id-123",
+   wechat_connect_app_secret_configured: true,
+
+diff --git a/frontend/src/views/auth/LinuxDoCallbackView.vue b/frontend/src/views/auth/LinuxDoCallbackView.vue
+index fef5b90d..297c9b32 100644
+--- a/frontend/src/views/auth/LinuxDoCallbackView.vue
++++ b/frontend/src/views/auth/LinuxDoCallbackView.vue
+@@ -130,6 +130,7 @@
+                     {{ t('auth.oauthFlow.bindExistingAccount') }}
+                   </button>
+                   <button
++                    v-if="createAccountAllowed"
+                     class="btn btn-primary w-full"
+                     :disabled="isSubmitting"
+                     @click="switchToCreateAccountMode"
+@@ -290,6 +291,7 @@ const bindLoginPassword = ref('')
+ const legacyPendingOAuthToken = ref('')
+ const accountActionError = ref('')
+ const canReturnToCreateAccount = ref(false)
++const createAccountAllowed = ref(true)
+ const bindSuccessMessage = t('profile.authBindings.bindSuccess')
+ const needsTotpChallenge = ref(false)
+ const totpTempToken = ref('')
+@@ -334,6 +336,7 @@ type LinuxDoPendingActionResponse = PendingOAuthExchangeResponse & {
+   pending_email?: string
+   existing_account_email?: string
+   suggested_email?: string
++  create_account_allowed?: boolean
+ }
+ 
+ function persistPendingAuthSession(redirect?: string) {
+@@ -474,10 +477,19 @@ function resolvePendingAccountAction(
+   return 'none'
+ }
+ 
++function resolveCreateAccountAllowed(completion: LinuxDoPendingActionResponse): boolean {
++  if (typeof completion.create_account_allowed === 'boolean') {
++    return completion.create_account_allowed
++  }
++  // Legacy pending responses without the flag keep the previous create-account UX.
++  return true
++}
++
+ function applyPendingAccountAction(completion: LinuxDoPendingActionResponse) {
+   const action = resolvePendingAccountAction(completion)
+   pendingAccountAction.value = action
+   accountActionError.value = ''
++  createAccountAllowed.value = resolveCreateAccountAllowed(completion)
+   needsTotpChallenge.value = false
+   totpTempToken.value = ''
+   totpCode.value = ''
+@@ -495,6 +507,8 @@ function applyPendingAccountAction(completion: LinuxDoPendingActionResponse) {
+ 
+   if (action === 'create_account') {
+     pendingAccountEmail.value = email
++    // Backend routed here for create; allow return-to-create from bind even if flag was omitted.
++    createAccountAllowed.value = true
+     canReturnToCreateAccount.value = true
+     return
+   }
+@@ -531,10 +545,13 @@ function switchToBindLoginMode(nextEmail?: string) {
+   bindLoginEmail.value = bindLoginEmail.value.trim() || nextEmail?.trim() || pendingAccountEmail.value.trim()
+   bindLoginPassword.value = ''
+   accountActionError.value = ''
+-  canReturnToCreateAccount.value = true
++  canReturnToCreateAccount.value = createAccountAllowed.value
+ }
+ 
+ function switchToCreateAccountMode() {
++  if (!createAccountAllowed.value) {
++    return
++  }
+   pendingAccountAction.value = 'create_account'
+   pendingAccountEmail.value = pendingAccountEmail.value.trim() || bindLoginEmail.value.trim()
+   accountActionError.value = ''
+
+diff --git a/frontend/src/views/auth/__tests__/LinuxDoCallbackView.spec.ts b/frontend/src/views/auth/__tests__/LinuxDoCallbackView.spec.ts
+index 29e3a332..be1c094d 100644
+--- a/frontend/src/views/auth/__tests__/LinuxDoCallbackView.spec.ts
++++ b/frontend/src/views/auth/__tests__/LinuxDoCallbackView.spec.ts
+@@ -437,6 +437,59 @@ describe('LinuxDoCallbackView', () => {
+     })
+   })
+ 
++  it('hides create-account entry when backend sets create_account_allowed=false', async () => {
++    exchangePendingOAuthCompletion.mockResolvedValue({
++      step: 'bind_login_required',
++      redirect: '/dashboard',
++      create_account_allowed: false,
++      existing_account_bindable: true,
++      email: 'existing@example.com'
++    })
++
++    const wrapper = mount(LinuxDoCallbackView, {
++      global: {
++        stubs: {
++          AuthLayout: { template: '<div><slot /></div>' },
++          Icon: true,
++          RouterLink: { template: '<a><slot /></a>' },
++          transition: false
++        }
++      }
++    })
++
++    await flushPromises()
++
++    expect(wrapper.text()).toContain('auth.oauthFlow.bindLoginHint')
++    expect(wrapper.text()).not.toContain('auth.oauthFlow.createNewAccount')
++    expect(wrapper.text()).not.toContain('auth.oauthFlow.useDifferentEmail')
++    expect(wrapper.get('[data-testid="linuxdo-bind-login-email"]').element.value).toBe('existing@example.com')
++  })
++
++  it('shows create-account chooser option when create_account_allowed is true or omitted', async () => {
++    exchangePendingOAuthCompletion.mockResolvedValue({
++      step: 'choose_account_action_required',
++      redirect: '/dashboard',
++      create_account_allowed: true,
++      email: 'fresh@example.com'
++    })
++
++    const wrapper = mount(LinuxDoCallbackView, {
++      global: {
++        stubs: {
++          AuthLayout: { template: '<div><slot /></div>' },
++          Icon: true,
++          RouterLink: { template: '<a><slot /></a>' },
++          transition: false
++        }
++      }
++    })
++
++    await flushPromises()
++
++    expect(wrapper.text()).toContain('auth.oauthFlow.bindExistingAccount')
++    expect(wrapper.text()).toContain('auth.oauthFlow.createNewAccount')
++  })
++
+   it('keeps the oauth flow active when complete-registration returns another pending step', async () => {
+     exchangePendingOAuthCompletion.mockResolvedValue({
+       error: 'invitation_required',
+
+diff --git a/backend/internal/handler/admin/setting_handler_linuxdo_test.go b/backend/internal/handler/admin/setting_handler_linuxdo_test.go
+new file mode 100644
+index e69de29b..ab869f66 100644
+--- /dev/null
++++ b/backend/internal/handler/admin/setting_handler_linuxdo_test.go
+@@ -0,0 +1,80 @@
++package admin
++
++import (
++	"bytes"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/Wei-Shaw/sub2api/internal/config"
++	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
++	"github.com/Wei-Shaw/sub2api/internal/service"
++	"github.com/gin-gonic/gin"
++	"github.com/stretchr/testify/require"
++)
++
++func newLinuxDoSettingsHandler() (*SettingHandler, *settingHandlerRepoStub) {
++	repo := &settingHandlerRepoStub{values: map[string]string{}}
++	svc := service.NewSettingService(repo, &config.Config{Default: config.DefaultConfig{UserConcurrency: 5}})
++	handler := NewSettingHandler(svc, nil, nil, nil, nil, nil, nil)
++	return handler, repo
++}
++
++func baseValidLinuxDoBody() map[string]any {
++	return map[string]any{
++		"linuxdo_connect_enabled":       true,
++		"linuxdo_connect_client_id":     "linuxdo-client",
++		"linuxdo_connect_client_secret": "linuxdo-secret",
++		"linuxdo_connect_redirect_url":  "https://example.com/api/v1/auth/oauth/linuxdo/callback",
++	}
++}
++
++// TestSettingsPUT_LinuxDo_BypassRegistration_RoundTrip verifies save+load for bypass_registration.
++func TestSettingsPUT_LinuxDo_BypassRegistration_RoundTrip(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	handler, _ := newLinuxDoSettingsHandler()
++
++	body := baseValidLinuxDoBody()
++	body["linuxdo_connect_bypass_registration"] = true
++
++	rawBody, err := json.Marshal(body)
++	require.NoError(t, err)
++
++	rec := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(rec)
++	c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", bytes.NewReader(rawBody))
++	c.Request.Header.Set("Content-Type", "application/json")
++
++	handler.UpdateSettings(c)
++
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	var resp response.Response
++	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
++	data, ok := resp.Data.(map[string]any)
++	require.True(t, ok)
++	require.Equal(t, true, data["linuxdo_connect_bypass_registration"])
++}
++
++func TestSettingsPUT_LinuxDo_BypassRegistration_DefaultFalse(t *testing.T) {
++	gin.SetMode(gin.TestMode)
++	handler, _ := newLinuxDoSettingsHandler()
++
++	body := baseValidLinuxDoBody()
++	rawBody, err := json.Marshal(body)
++	require.NoError(t, err)
++
++	rec := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(rec)
++	c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings", bytes.NewReader(rawBody))
++	c.Request.Header.Set("Content-Type", "application/json")
++
++	handler.UpdateSettings(c)
++
++	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
++	var resp response.Response
++	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
++	data, ok := resp.Data.(map[string]any)
++	require.True(t, ok)
++	require.Equal(t, false, data["linuxdo_connect_bypass_registration"])
++}
+
