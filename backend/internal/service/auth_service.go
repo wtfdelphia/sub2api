@@ -568,17 +568,31 @@ func (s *AuthService) LoginOrRegisterOAuth(ctx context.Context, email, username 
 	return token, user, nil
 }
 
-// canBypassRegistrationDisabledForOAuth 在钉钉企业模式（internal_only）且
-// dingtalk_connect_bypass_registration=true 时，允许跳过全局 registration_enabled 检查。
+// canBypassRegistrationDisabledForOAuth 在指定 OAuth 渠道开启「绕过开放注册」时，
+// 允许跳过全局 registration_enabled 检查。
+//
+// - dingtalk：需 bypass_registration=true 且 corp_restriction_policy=internal_only
+// - linuxdo：需 bypass_registration=true（无企业 corp 门；开启即允许该渠道自助建号）
 func (s *AuthService) canBypassRegistrationDisabledForOAuth(ctx context.Context, signupSource string) bool {
-	if signupSource != "dingtalk" {
+	if s == nil || s.settingService == nil {
 		return false
 	}
-	cfg, err := s.settingService.GetDingTalkConnectOAuthConfig(ctx)
-	if err != nil || !cfg.Enabled || !cfg.BypassRegistration {
+	switch signupSource {
+	case "dingtalk":
+		cfg, err := s.settingService.GetDingTalkConnectOAuthConfig(ctx)
+		if err != nil || !cfg.Enabled || !cfg.BypassRegistration {
+			return false
+		}
+		return cfg.CorpRestrictionPolicy == "internal_only"
+	case "linuxdo":
+		enabled, bypass, err := s.settingService.GetLinuxDoConnectRegistrationBypass(ctx)
+		if err != nil || !enabled || !bypass {
+			return false
+		}
+		return true
+	default:
 		return false
 	}
-	return cfg.CorpRestrictionPolicy == "internal_only"
 }
 
 // LoginOrRegisterOAuthWithTokenPair 用于第三方 OAuth/SSO 登录，返回完整的 TokenPair。

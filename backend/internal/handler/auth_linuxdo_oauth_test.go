@@ -1223,14 +1223,91 @@ func newLinuxDoOAuthHandlerAndClientWithEmailVerification(
 }
 
 func configureLinuxDoOAuthTestHandler(handler *AuthHandler, oauthCfg config.LinuxDoConnectConfig) {
-	handler.settingSvc = nil
-	handler.cfg = &config.Config{
-		JWT: config.JWTConfig{
-			Secret:                   "test-secret",
-			ExpireHour:               1,
-			AccessTokenExpireMinutes: 60,
-			RefreshTokenExpireDays:   7,
-		},
-		LinuxDo: oauthCfg,
+	// Keep settingSvc so registration / invitation / bypass checks stay functional.
+	// Inject LinuxDo OAuth config into handler.cfg only; settingSvc falls back to the same cfg pointer.
+	if handler.cfg == nil {
+		handler.cfg = &config.Config{
+			JWT: config.JWTConfig{
+				Secret:                   "test-secret",
+				ExpireHour:               1,
+				AccessTokenExpireMinutes: 60,
+				RefreshTokenExpireDays:   7,
+			},
+		}
 	}
+	handler.cfg.LinuxDo = oauthCfg
+}
+
+func TestIsLinuxDoSignupBlocked(t *testing.T) {
+	t.Parallel()
+
+	t.Run("settingSvc nil -> fail-closed blocked", func(t *testing.T) {
+		h := &AuthHandler{}
+		require.True(t, h.isLinuxDoSignupBlocked(context.Background()))
+	})
+
+	t.Run("registration enabled -> not blocked", func(t *testing.T) {
+		handler, _ := newOAuthPendingFlowTestHandler(t, false)
+		require.False(t, handler.isLinuxDoSignupBlocked(context.Background()))
+	})
+
+	t.Run("registration disabled + bypass off -> blocked", func(t *testing.T) {
+		ld := config.LinuxDoConnectConfig{
+			Enabled:             true,
+			ClientID:            "linuxdo-client",
+			ClientSecret:        "linuxdo-secret",
+			AuthorizeURL:        "https://connect.linux.do/oauth2/authorize",
+			TokenURL:            "https://connect.linux.do/oauth2/token",
+			UserInfoURL:         "https://connect.linux.do/api/user",
+			RedirectURL:         "https://example.com/api/v1/auth/oauth/linuxdo/callback",
+			FrontendRedirectURL: "/auth/linuxdo/callback",
+			TokenAuthMethod:     "client_secret_post",
+			BypassRegistration:  false,
+		}
+		handler := &AuthHandler{
+			cfg: &config.Config{LinuxDo: ld},
+			settingSvc: service.NewSettingService(
+				&oauthPendingFlowSettingRepoStub{values: map[string]string{
+					service.SettingKeyRegistrationEnabled:              "false",
+					service.SettingKeyLinuxDoConnectEnabled:            "true",
+					service.SettingKeyLinuxDoConnectBypassRegistration: "false",
+					service.SettingKeyLinuxDoConnectClientID:           "linuxdo-client",
+					service.SettingKeyLinuxDoConnectClientSecret:       "linuxdo-secret",
+					service.SettingKeyLinuxDoConnectRedirectURL:        "https://example.com/api/v1/auth/oauth/linuxdo/callback",
+				}},
+				&config.Config{LinuxDo: ld},
+			),
+		}
+		require.True(t, handler.isLinuxDoSignupBlocked(context.Background()))
+	})
+
+	t.Run("registration disabled + bypass on -> not blocked", func(t *testing.T) {
+		ld := config.LinuxDoConnectConfig{
+			Enabled:             true,
+			ClientID:            "linuxdo-client",
+			ClientSecret:        "linuxdo-secret",
+			AuthorizeURL:        "https://connect.linux.do/oauth2/authorize",
+			TokenURL:            "https://connect.linux.do/oauth2/token",
+			UserInfoURL:         "https://connect.linux.do/api/user",
+			RedirectURL:         "https://example.com/api/v1/auth/oauth/linuxdo/callback",
+			FrontendRedirectURL: "/auth/linuxdo/callback",
+			TokenAuthMethod:     "client_secret_post",
+			BypassRegistration:  true,
+		}
+		handler := &AuthHandler{
+			cfg: &config.Config{LinuxDo: ld},
+			settingSvc: service.NewSettingService(
+				&oauthPendingFlowSettingRepoStub{values: map[string]string{
+					service.SettingKeyRegistrationEnabled:              "false",
+					service.SettingKeyLinuxDoConnectEnabled:            "true",
+					service.SettingKeyLinuxDoConnectBypassRegistration: "true",
+					service.SettingKeyLinuxDoConnectClientID:           "linuxdo-client",
+					service.SettingKeyLinuxDoConnectClientSecret:       "linuxdo-secret",
+					service.SettingKeyLinuxDoConnectRedirectURL:        "https://example.com/api/v1/auth/oauth/linuxdo/callback",
+				}},
+				&config.Config{LinuxDo: ld},
+			),
+		}
+		require.False(t, handler.isLinuxDoSignupBlocked(context.Background()))
+	})
 }

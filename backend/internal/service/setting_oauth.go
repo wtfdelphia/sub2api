@@ -485,6 +485,7 @@ func (s *SettingService) GetLinuxDoConnectOAuthConfig(ctx context.Context) (conf
 		SettingKeyLinuxDoConnectClientID,
 		SettingKeyLinuxDoConnectClientSecret,
 		SettingKeyLinuxDoConnectRedirectURL,
+		SettingKeyLinuxDoConnectBypassRegistration,
 	}
 	settings, err := s.settingRepo.GetMultiple(ctx, keys)
 	if err != nil {
@@ -502,6 +503,9 @@ func (s *SettingService) GetLinuxDoConnectOAuthConfig(ctx context.Context) (conf
 	}
 	if v, ok := settings[SettingKeyLinuxDoConnectRedirectURL]; ok && strings.TrimSpace(v) != "" {
 		effective.RedirectURL = strings.TrimSpace(v)
+	}
+	if raw, ok := settings[SettingKeyLinuxDoConnectBypassRegistration]; ok && strings.TrimSpace(raw) != "" {
+		effective.BypassRegistration = strings.EqualFold(strings.TrimSpace(raw), "true")
 	}
 	if !effective.Enabled {
 		return config.LinuxDoConnectConfig{}, infraerrors.NotFound("OAUTH_DISABLED", "oauth login is disabled")
@@ -555,6 +559,34 @@ func (s *SettingService) GetLinuxDoConnectOAuthConfig(ctx context.Context) (conf
 	}
 
 	return effective, nil
+}
+
+// GetLinuxDoConnectRegistrationBypass returns whether LinuxDo OAuth may create users
+// while global registration is disabled. Unlike GetLinuxDoConnectOAuthConfig, this does
+// not require full OAuth endpoint validity — it only merges enabled + bypass flags.
+func (s *SettingService) GetLinuxDoConnectRegistrationBypass(ctx context.Context) (enabled bool, bypass bool, err error) {
+	if s == nil || s.cfg == nil {
+		return false, false, infraerrors.ServiceUnavailable("CONFIG_NOT_READY", "config not loaded")
+	}
+	enabled = s.cfg.LinuxDo.Enabled
+	bypass = s.cfg.LinuxDo.BypassRegistration
+	if s.settingRepo == nil {
+		return enabled, bypass, nil
+	}
+	settings, err := s.settingRepo.GetMultiple(ctx, []string{
+		SettingKeyLinuxDoConnectEnabled,
+		SettingKeyLinuxDoConnectBypassRegistration,
+	})
+	if err != nil {
+		return false, false, fmt.Errorf("get linuxdo bypass settings: %w", err)
+	}
+	if raw, ok := settings[SettingKeyLinuxDoConnectEnabled]; ok {
+		enabled = raw == "true"
+	}
+	if raw, ok := settings[SettingKeyLinuxDoConnectBypassRegistration]; ok && strings.TrimSpace(raw) != "" {
+		bypass = strings.EqualFold(strings.TrimSpace(raw), "true")
+	}
+	return enabled, bypass, nil
 }
 
 // GetDingTalkConnectOAuthConfig 返回用于登录的"最终生效" DingTalk Connect 配置。

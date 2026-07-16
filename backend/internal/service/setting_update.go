@@ -161,6 +161,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	if settings.LinuxDoConnectClientSecret != "" {
 		updates[SettingKeyLinuxDoConnectClientSecret] = settings.LinuxDoConnectClientSecret
 	}
+	updates[SettingKeyLinuxDoConnectBypassRegistration] = strconv.FormatBool(settings.LinuxDoConnectBypassRegistration)
 
 	// DingTalk Connect OAuth 登录
 	updates[SettingKeyDingTalkConnectEnabled] = strconv.FormatBool(settings.DingTalkConnectEnabled)

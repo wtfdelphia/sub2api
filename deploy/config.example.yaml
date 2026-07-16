@@ -923,6 +923,9 @@ linuxdo_connect:
   userinfo_email_path: ""
   userinfo_id_path: ""
   userinfo_username_path: ""
+  # 开放 LinuxDo 注册：即使全局「开放注册」关闭，仍允许通过 LinuxDo 登录创建账号。
+  # 默认 false。LinuxDo 无企业 corp 限制，开启前请评估风险；建议同时开启「邀请码注册」。
+  bypass_registration: false
 
 # =============================================================================
 # Generic OIDC OAuth Login (SSO)

@@ -370,6 +370,12 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	}
 	result.LinuxDoConnectClientSecretConfigured = result.LinuxDoConnectClientSecret != ""
 
+	if raw, ok := settings[SettingKeyLinuxDoConnectBypassRegistration]; ok && strings.TrimSpace(raw) != "" {
+		result.LinuxDoConnectBypassRegistration = strings.EqualFold(strings.TrimSpace(raw), "true")
+	} else {
+		result.LinuxDoConnectBypassRegistration = linuxDoBase.BypassRegistration
+	}
+
 	// DingTalk Connect 设置：
 	// - 兼容 config.yaml/env
 	// - 支持后台系统设置覆盖并持久化（存储于 DB）

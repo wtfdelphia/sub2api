@@ -130,6 +130,7 @@
                     {{ t('auth.oauthFlow.bindExistingAccount') }}
                   </button>
                   <button
+                    v-if="createAccountAllowed"
                     class="btn btn-primary w-full"
                     :disabled="isSubmitting"
                     @click="switchToCreateAccountMode"
@@ -290,6 +291,7 @@ const bindLoginPassword = ref('')
 const legacyPendingOAuthToken = ref('')
 const accountActionError = ref('')
 const canReturnToCreateAccount = ref(false)
+const createAccountAllowed = ref(true)
 const bindSuccessMessage = t('profile.authBindings.bindSuccess')
 const needsTotpChallenge = ref(false)
 const totpTempToken = ref('')
@@ -334,6 +336,7 @@ type LinuxDoPendingActionResponse = PendingOAuthExchangeResponse & {
   pending_email?: string
   existing_account_email?: string
   suggested_email?: string
+  create_account_allowed?: boolean
 }
 
 function persistPendingAuthSession(redirect?: string) {
@@ -474,10 +477,19 @@ function resolvePendingAccountAction(
   return 'none'
 }
 
+function resolveCreateAccountAllowed(completion: LinuxDoPendingActionResponse): boolean {
+  if (typeof completion.create_account_allowed === 'boolean') {
+    return completion.create_account_allowed
+  }
+  // Legacy pending responses without the flag keep the previous create-account UX.
+  return true
+}
+
 function applyPendingAccountAction(completion: LinuxDoPendingActionResponse) {
   const action = resolvePendingAccountAction(completion)
   pendingAccountAction.value = action
   accountActionError.value = ''
+  createAccountAllowed.value = resolveCreateAccountAllowed(completion)
   needsTotpChallenge.value = false
   totpTempToken.value = ''
   totpCode.value = ''
@@ -495,6 +507,8 @@ function applyPendingAccountAction(completion: LinuxDoPendingActionResponse) {
 
   if (action === 'create_account') {
     pendingAccountEmail.value = email
+    // Backend routed here for create; allow return-to-create from bind even if flag was omitted.
+    createAccountAllowed.value = true
     canReturnToCreateAccount.value = true
     return
   }
@@ -531,10 +545,13 @@ function switchToBindLoginMode(nextEmail?: string) {
   bindLoginEmail.value = bindLoginEmail.value.trim() || nextEmail?.trim() || pendingAccountEmail.value.trim()
   bindLoginPassword.value = ''
   accountActionError.value = ''
-  canReturnToCreateAccount.value = true
+  canReturnToCreateAccount.value = createAccountAllowed.value
 }
 
 function switchToCreateAccountMode() {
+  if (!createAccountAllowed.value) {
+    return
+  }
   pendingAccountAction.value = 'create_account'
   pendingAccountEmail.value = pendingAccountEmail.value.trim() || bindLoginEmail.value.trim()
   accountActionError.value = ''

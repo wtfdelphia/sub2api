@@ -160,7 +160,10 @@ export default {
         redirectUrlPlaceholder: 'https://your-domain.com/api/v1/auth/oauth/linuxdo/callback',
         redirectUrlHint: '需与 Connect.Linux.Do 中配置的回调地址一致（必须是 http(s) 完整 URL）',
         quickSetCopy: '使用当前站点生成并复制',
-        redirectUrlSetAndCopied: '已使用当前站点生成回调地址并复制到剪贴板'
+        redirectUrlSetAndCopied: '已使用当前站点生成回调地址并复制到剪贴板',
+        bypassRegistration: '开放 LinuxDo 注册',
+        bypassRegistrationHint:
+          '即使「开放注册」关闭时也可以通过 LinuxDo 登录来注册。注意：LinuxDo 无企业成员限制，开启后任意成功完成 OAuth 的 LinuxDo 用户均可建号；建议同时开启邀请码。'
       },
       dingtalk: {
         title: '钉钉登录',

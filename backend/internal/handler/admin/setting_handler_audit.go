@@ -113,6 +113,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.LinuxDoConnectRedirectURL != after.LinuxDoConnectRedirectURL {
 		changed = append(changed, "linuxdo_connect_redirect_url")
 	}
+	if before.LinuxDoConnectBypassRegistration != after.LinuxDoConnectBypassRegistration {
+		changed = append(changed, "linuxdo_connect_bypass_registration")
+	}
 	if before.DingTalkConnectEnabled != after.DingTalkConnectEnabled {
 		changed = append(changed, "dingtalk_connect_enabled")
 	}

@@ -2503,6 +2503,7 @@ CREATE TABLE IF NOT EXISTS user_affiliates (
 	}
 
 	return &AuthHandler{
+		cfg:          cfg,
 		authService:  authSvc,
 		userService:  userSvc,
 		settingSvc:   settingSvc,

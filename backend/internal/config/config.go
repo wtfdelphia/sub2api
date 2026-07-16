@@ -244,6 +244,12 @@ type LinuxDoConnectConfig struct {
 	UserInfoEmailPath    string `mapstructure:"userinfo_email_path"`
 	UserInfoIDPath       string `mapstructure:"userinfo_id_path"`
 	UserInfoUsernamePath string `mapstructure:"userinfo_username_path"`
+
+	// BypassRegistration allows LinuxDo OAuth to create new users even when
+	// global registration_enabled is false. Default false. Unlike DingTalk,
+	// LinuxDo has no corp internal_only gate — opening this is equivalent to
+	// allowing any successful LinuxDo OAuth identity to self-register.
+	BypassRegistration bool `mapstructure:"bypass_registration"`
 }
 
 type WeChatConnectConfig struct {
@@ -1713,6 +1719,7 @@ func setDefaults() {
 	viper.SetDefault("linuxdo_connect.userinfo_email_path", "")
 	viper.SetDefault("linuxdo_connect.userinfo_id_path", "")
 	viper.SetDefault("linuxdo_connect.userinfo_username_path", "")
+	viper.SetDefault("linuxdo_connect.bypass_registration", false)
 
 	// WeChat Connect OAuth 登录
 	viper.SetDefault("wechat_connect.enabled", false)

@@ -457,6 +457,7 @@ export interface SystemSettings {
   linuxdo_connect_client_id: string;
   linuxdo_connect_client_secret_configured: boolean;
   linuxdo_connect_redirect_url: string;
+  linuxdo_connect_bypass_registration: boolean;
 
   // DingTalk Connect OAuth settings
   dingtalk_connect_enabled: boolean;
@@ -749,6 +750,7 @@ export interface UpdateSettingsRequest {
   linuxdo_connect_client_id?: string;
   linuxdo_connect_client_secret?: string;
   linuxdo_connect_redirect_url?: string;
+  linuxdo_connect_bypass_registration?: boolean;
   dingtalk_connect_enabled?: boolean;
   dingtalk_connect_client_id?: string;
   dingtalk_connect_client_secret?: string;

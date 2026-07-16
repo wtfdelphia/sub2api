@@ -168,10 +168,11 @@ const (
 	SettingKeyTotpEnabled = "totp_enabled" // 是否启用 TOTP 2FA 功能
 
 	// LinuxDo Connect OAuth 登录设置
-	SettingKeyLinuxDoConnectEnabled      = "linuxdo_connect_enabled"
-	SettingKeyLinuxDoConnectClientID     = "linuxdo_connect_client_id"
-	SettingKeyLinuxDoConnectClientSecret = "linuxdo_connect_client_secret"
-	SettingKeyLinuxDoConnectRedirectURL  = "linuxdo_connect_redirect_url"
+	SettingKeyLinuxDoConnectEnabled            = "linuxdo_connect_enabled"
+	SettingKeyLinuxDoConnectClientID           = "linuxdo_connect_client_id"
+	SettingKeyLinuxDoConnectClientSecret       = "linuxdo_connect_client_secret"
+	SettingKeyLinuxDoConnectRedirectURL        = "linuxdo_connect_redirect_url"
+	SettingKeyLinuxDoConnectBypassRegistration = "linuxdo_connect_bypass_registration"
 
 	// DingTalk Connect OAuth 登录设置
 	SettingKeyDingTalkConnectEnabled                 = "dingtalk_connect_enabled"

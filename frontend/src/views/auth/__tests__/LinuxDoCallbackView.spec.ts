@@ -437,6 +437,59 @@ describe('LinuxDoCallbackView', () => {
     })
   })
 
+  it('hides create-account entry when backend sets create_account_allowed=false', async () => {
+    exchangePendingOAuthCompletion.mockResolvedValue({
+      step: 'bind_login_required',
+      redirect: '/dashboard',
+      create_account_allowed: false,
+      existing_account_bindable: true,
+      email: 'existing@example.com'
+    })
+
+    const wrapper = mount(LinuxDoCallbackView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /></div>' },
+          Icon: true,
+          RouterLink: { template: '<a><slot /></a>' },
+          transition: false
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('auth.oauthFlow.bindLoginHint')
+    expect(wrapper.text()).not.toContain('auth.oauthFlow.createNewAccount')
+    expect(wrapper.text()).not.toContain('auth.oauthFlow.useDifferentEmail')
+    expect(wrapper.get('[data-testid="linuxdo-bind-login-email"]').element.value).toBe('existing@example.com')
+  })
+
+  it('shows create-account chooser option when create_account_allowed is true or omitted', async () => {
+    exchangePendingOAuthCompletion.mockResolvedValue({
+      step: 'choose_account_action_required',
+      redirect: '/dashboard',
+      create_account_allowed: true,
+      email: 'fresh@example.com'
+    })
+
+    const wrapper = mount(LinuxDoCallbackView, {
+      global: {
+        stubs: {
+          AuthLayout: { template: '<div><slot /></div>' },
+          Icon: true,
+          RouterLink: { template: '<a><slot /></a>' },
+          transition: false
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('auth.oauthFlow.bindExistingAccount')
+    expect(wrapper.text()).toContain('auth.oauthFlow.createNewAccount')
+  })
+
   it('keeps the oauth flow active when complete-registration returns another pending step', async () => {
     exchangePendingOAuthCompletion.mockResolvedValue({
       error: 'invitation_required',

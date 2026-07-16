@@ -46,6 +46,7 @@ type SystemSettings struct {
 	LinuxDoConnectClientSecret           string
 	LinuxDoConnectClientSecretConfigured bool
 	LinuxDoConnectRedirectURL            string
+	LinuxDoConnectBypassRegistration     bool
 
 	// DingTalk Connect OAuth 登录
 	DingTalkConnectEnabled                 bool

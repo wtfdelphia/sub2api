@@ -142,6 +142,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		LinuxDoConnectClientID:                                 settings.LinuxDoConnectClientID,
 		LinuxDoConnectClientSecretConfigured:                   settings.LinuxDoConnectClientSecretConfigured,
 		LinuxDoConnectRedirectURL:                              settings.LinuxDoConnectRedirectURL,
+		LinuxDoConnectBypassRegistration:                      settings.LinuxDoConnectBypassRegistration,
 		DingTalkConnectEnabled:                                 settings.DingTalkConnectEnabled,
 		DingTalkConnectClientID:                                settings.DingTalkConnectClientID,
 		DingTalkConnectClientSecretConfigured:                  settings.DingTalkConnectClientSecretConfigured,

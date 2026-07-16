@@ -326,7 +326,26 @@ func (h *AuthHandler) LinuxDoOAuthCallback(c *gin.Context) {
 	}
 	emailVerificationRequired := h != nil && h.authService != nil && h.authService.IsEmailVerifyEnabled(c.Request.Context())
 	forceEmailOnSignup := h.isForceEmailOnThirdPartySignup(c.Request.Context())
+	signupBlocked := h.isLinuxDoSignupBlocked(c.Request.Context())
 	if compatEmailUser == nil && !emailVerificationRequired && !forceEmailOnSignup {
+		if signupBlocked {
+			// 注册关闭且未开启 LinuxDo 注册旁路：不要尝试建号，直接引导绑定已有账号。
+			if err := h.createOAuthPendingSession(c, oauthPendingSessionPayload{
+				Intent:                 oauthIntentLogin,
+				Identity:               identityKey,
+				TargetUserID:           nil,
+				ResolvedEmail:          "",
+				RedirectTo:             redirectTo,
+				BrowserSessionKey:      browserSessionKey,
+				UpstreamIdentityClaims: upstreamClaims,
+				CompletionResponse:     linuxDoBindLoginCompletionResponse(redirectTo),
+			}); err != nil {
+				redirectOAuthError(c, frontendCallback, "session_error", "failed to continue oauth login", "")
+				return
+			}
+			redirectToFrontendCallback(c, frontendCallback)
+			return
+		}
 		if err := h.ensureBackendModeAllowsNewUserLogin(c.Request.Context()); err != nil {
 			redirectOAuthError(c, frontendCallback, "session_error", infraerrors.Reason(err), infraerrors.Message(err))
 			return
@@ -385,6 +404,7 @@ func (h *AuthHandler) LinuxDoOAuthCallback(c *gin.Context) {
 		compatEmailUser,
 		emailVerificationRequired,
 		forceEmailOnSignup,
+		signupBlocked,
 	); err != nil {
 		redirectOAuthError(c, frontendCallback, "session_error", "failed to continue oauth login", "")
 		return
@@ -436,6 +456,7 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
 	compatEmailUser *dbent.User,
 	emailVerificationRequired bool,
 	forceEmailOnSignup bool,
+	signupBlocked bool,
 ) error {
 	suggestionEmail := strings.TrimSpace(suggestedEmail)
 	canonicalEmail := strings.TrimSpace(resolvedEmail)
@@ -451,7 +472,7 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
 		"resolved_email":            canonicalEmail,
 		"existing_account_email":    "",
 		"existing_account_bindable": false,
-		"create_account_allowed":    true,
+		"create_account_allowed":    !signupBlocked,
 		"force_email_on_signup":     forceEmailOnSignup,
 		"choice_reason":             "third_party_signup",
 	}
@@ -469,7 +490,13 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
 	if forceEmailOnSignup && compatEmailUser == nil {
 		completionResponse["choice_reason"] = "force_email_on_signup"
 	}
-	if (emailVerificationRequired || forceEmailOnSignup) && compatEmailUser == nil {
+	// 注册被拦：直接 bind_login，避免展示「创建新账户」或补邮箱表单后才失败。
+	if signupBlocked {
+		completionResponse["step"] = "bind_login_required"
+		completionResponse["existing_account_bindable"] = true
+		completionResponse["create_account_allowed"] = false
+		completionResponse["choice_reason"] = "signup_blocked_redirect_to_bind"
+	} else if (emailVerificationRequired || forceEmailOnSignup) && compatEmailUser == nil {
 		completionResponse["step"] = "create_account_required"
 		completionResponse["email_binding_required"] = true
 		completionResponse["force_email_on_signup"] = true
@@ -496,6 +523,32 @@ func (h *AuthHandler) createLinuxDoOAuthChoicePendingSession(
 		UpstreamIdentityClaims: upstreamClaims,
 		CompletionResponse:     completionResponse,
 	})
+}
+
+// isLinuxDoSignupBlocked 当注册总开关关闭且未开启 LinuxDo 注册旁路时返回 true。
+// 镜像 isDingTalkSignupBlocked / canBypassRegistrationDisabledForOAuth("linuxdo")。
+// settingSvc 为空或配置读取失败时 fail-closed（返回 true）。
+func (h *AuthHandler) isLinuxDoSignupBlocked(ctx context.Context) bool {
+	if h == nil || h.settingSvc == nil {
+		return true
+	}
+	if h.settingSvc.IsRegistrationEnabled(ctx) {
+		return false
+	}
+	enabled, bypass, err := h.settingSvc.GetLinuxDoConnectRegistrationBypass(ctx)
+	if err != nil || !enabled || !bypass {
+		return true
+	}
+	return false
+}
+
+func linuxDoBindLoginCompletionResponse(redirectTo string) map[string]any {
+	return map[string]any{
+		"step":                      "bind_login_required",
+		"existing_account_bindable": true,
+		"create_account_allowed":    false,
+		"redirect":                  redirectTo,
+	}
 }
 
 type completeLinuxDoOAuthRequest struct {

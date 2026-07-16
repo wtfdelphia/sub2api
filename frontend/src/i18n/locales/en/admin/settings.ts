@@ -161,7 +161,10 @@ export default {
         redirectUrlHint:
           'Must match the redirect URL configured in Connect.Linux.Do (must be an absolute http(s) URL)',
         quickSetCopy: 'Generate & Copy (current site)',
-        redirectUrlSetAndCopied: 'Redirect URL generated and copied to clipboard'
+        redirectUrlSetAndCopied: 'Redirect URL generated and copied to clipboard',
+        bypassRegistration: 'Allow LinuxDo Registration',
+        bypassRegistrationHint:
+          'Allow users to register via LinuxDo login even when global registration is disabled. Warning: LinuxDo has no corporate membership gate; any user who completes LinuxDo OAuth can create an account. Prefer enabling invitation codes as well.'
       },
       dingtalk: {
         title: 'DingTalk Login',

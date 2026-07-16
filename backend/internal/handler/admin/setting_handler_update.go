@@ -50,10 +50,11 @@ type UpdateSettingsRequest struct {
 	APIKeyACLTrustForwardedIP *bool `json:"api_key_acl_trust_forwarded_ip"`
 
 	// LinuxDo Connect OAuth 登录
-	LinuxDoConnectEnabled      bool   `json:"linuxdo_connect_enabled"`
-	LinuxDoConnectClientID     string `json:"linuxdo_connect_client_id"`
-	LinuxDoConnectClientSecret string `json:"linuxdo_connect_client_secret"`
-	LinuxDoConnectRedirectURL  string `json:"linuxdo_connect_redirect_url"`
+	LinuxDoConnectEnabled              bool   `json:"linuxdo_connect_enabled"`
+	LinuxDoConnectClientID             string `json:"linuxdo_connect_client_id"`
+	LinuxDoConnectClientSecret         string `json:"linuxdo_connect_client_secret"`
+	LinuxDoConnectRedirectURL          string `json:"linuxdo_connect_redirect_url"`
+	LinuxDoConnectBypassRegistration   bool   `json:"linuxdo_connect_bypass_registration"`
 
 	// DingTalk Connect OAuth 登录
 	DingTalkConnectEnabled                 bool   `json:"dingtalk_connect_enabled"`
@@ -1195,6 +1196,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		LinuxDoConnectClientID:                 req.LinuxDoConnectClientID,
 		LinuxDoConnectClientSecret:             req.LinuxDoConnectClientSecret,
 		LinuxDoConnectRedirectURL:              req.LinuxDoConnectRedirectURL,
+		LinuxDoConnectBypassRegistration:       req.LinuxDoConnectBypassRegistration,
 		DingTalkConnectEnabled:                 req.DingTalkConnectEnabled,
 		DingTalkConnectClientID:                req.DingTalkConnectClientID,
 		DingTalkConnectClientSecret:            req.DingTalkConnectClientSecret,
@@ -1702,6 +1704,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		LinuxDoConnectClientID:                                 updatedSettings.LinuxDoConnectClientID,
 		LinuxDoConnectClientSecretConfigured:                   updatedSettings.LinuxDoConnectClientSecretConfigured,
 		LinuxDoConnectRedirectURL:                              updatedSettings.LinuxDoConnectRedirectURL,
+		LinuxDoConnectBypassRegistration:                      updatedSettings.LinuxDoConnectBypassRegistration,
 		DingTalkConnectEnabled:                                 updatedSettings.DingTalkConnectEnabled,
 		DingTalkConnectClientID:                                updatedSettings.DingTalkConnectClientID,
 		DingTalkConnectClientSecretConfigured:                  updatedSettings.DingTalkConnectClientSecretConfigured,

@@ -1803,6 +1803,20 @@
                       {{ t("admin.settings.linuxdo.redirectUrlHint") }}
                     </p>
                   </div>
+
+                  <div
+                    class="flex items-center justify-between border-t border-gray-100 pt-4 dark:border-dark-700"
+                  >
+                    <div>
+                      <label class="font-medium text-gray-900 dark:text-white">{{
+                        t("admin.settings.linuxdo.bypassRegistration")
+                      }}</label>
+                      <p class="text-sm text-gray-500 dark:text-gray-400">
+                        {{ t("admin.settings.linuxdo.bypassRegistrationHint") }}
+                      </p>
+                    </div>
+                    <Toggle v-model="form.linuxdo_connect_bypass_registration" />
+                  </div>
                 </div>
               </div>
             </div>
@@ -8137,6 +8151,7 @@ const form = reactive<SettingsForm>({
   linuxdo_connect_client_secret: "",
   linuxdo_connect_client_secret_configured: false,
   linuxdo_connect_redirect_url: "",
+  linuxdo_connect_bypass_registration: false,
   // DingTalk Connect OAuth 登录
   dingtalk_connect_enabled: false,
   dingtalk_connect_client_id: "",
@@ -9452,6 +9467,8 @@ async function saveSettings() {
       linuxdo_connect_client_secret:
         form.linuxdo_connect_client_secret || undefined,
       linuxdo_connect_redirect_url: form.linuxdo_connect_redirect_url,
+      linuxdo_connect_bypass_registration:
+        form.linuxdo_connect_bypass_registration,
       dingtalk_connect_enabled: form.dingtalk_connect_enabled,
       dingtalk_connect_client_id: form.dingtalk_connect_client_id,
       dingtalk_connect_client_secret:

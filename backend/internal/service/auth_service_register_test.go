@@ -760,6 +760,17 @@ func newAuthServiceWithDingTalkCfg(settings map[string]string, dtCfg config.Ding
 	return NewAuthService(nil, nil, nil, nil, cfg, settingService, nil, nil, nil, nil, nil, nil, nil)
 }
 
+// newAuthServiceWithLinuxDoCfg builds AuthService with LinuxDo Connect config for canBypass tests.
+func newAuthServiceWithLinuxDoCfg(settings map[string]string, ldCfg config.LinuxDoConnectConfig) *AuthService {
+	cfg := &config.Config{
+		JWT:     config.JWTConfig{Secret: "test-secret", ExpireHour: 1},
+		Default: config.DefaultConfig{UserBalance: 3.5, UserConcurrency: 2},
+		LinuxDo: ldCfg,
+	}
+	settingService := NewSettingService(&settingRepoStub{values: settings}, cfg)
+	return NewAuthService(nil, nil, nil, nil, cfg, settingService, nil, nil, nil, nil, nil, nil, nil)
+}
+
 // minDingTalkURLs 返回一个包含必填字段的基础 DingTalkConnectConfig（不设 Enabled/BypassRegistration/Policy）。
 func minDingTalkURLs() config.DingTalkConnectConfig {
 	return config.DingTalkConnectConfig{
@@ -775,6 +786,20 @@ func minDingTalkURLs() config.DingTalkConnectConfig {
 	}
 }
 
+// minLinuxDoURLs returns a valid LinuxDoConnectConfig base (without Enabled/BypassRegistration).
+func minLinuxDoURLs() config.LinuxDoConnectConfig {
+	return config.LinuxDoConnectConfig{
+		ClientID:            "linuxdo-client",
+		ClientSecret:        "linuxdo-secret",
+		AuthorizeURL:        "https://connect.linux.do/oauth2/authorize",
+		TokenURL:            "https://connect.linux.do/oauth2/token",
+		UserInfoURL:         "https://connect.linux.do/api/user",
+		RedirectURL:         "https://example.com/api/v1/auth/oauth/linuxdo/callback",
+		FrontendRedirectURL: "/auth/linuxdo/callback",
+		TokenAuthMethod:     "client_secret_post",
+	}
+}
+
 func TestCanBypassRegistrationDisabledForOAuth(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -784,7 +809,7 @@ func TestCanBypassRegistrationDisabledForOAuth(t *testing.T) {
 		want         bool
 	}{
 		{
-			name:         "non-dingtalk source → false",
+			name:         "non-dingtalk source without linuxdo bypass → false",
 			signupSource: "linuxdo",
 			settings:     map[string]string{},
 			dtCfg:        minDingTalkURLs(),
@@ -839,6 +864,48 @@ func TestCanBypassRegistrationDisabledForOAuth(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := newAuthServiceWithDingTalkCfg(tc.settings, tc.dtCfg)
 			got := svc.canBypassRegistrationDisabledForOAuth(context.Background(), tc.signupSource)
+			require.Equal(t, tc.want, got)
+		})
+	}
+
+	linuxDoCases := []struct {
+		name     string
+		settings map[string]string
+		ldCfg    config.LinuxDoConnectConfig
+		want     bool
+	}{
+		{
+			name: "linuxdo enabled but bypass=false → false",
+			settings: map[string]string{
+				SettingKeyLinuxDoConnectEnabled:            "true",
+				SettingKeyLinuxDoConnectBypassRegistration: "false",
+			},
+			ldCfg: minLinuxDoURLs(),
+			want:  false,
+		},
+		{
+			name: "linuxdo disabled + bypass=true → false",
+			settings: map[string]string{
+				SettingKeyLinuxDoConnectEnabled:            "false",
+				SettingKeyLinuxDoConnectBypassRegistration: "true",
+			},
+			ldCfg: minLinuxDoURLs(),
+			want:  false,
+		},
+		{
+			name: "linuxdo enabled + bypass=true → true",
+			settings: map[string]string{
+				SettingKeyLinuxDoConnectEnabled:            "true",
+				SettingKeyLinuxDoConnectBypassRegistration: "true",
+			},
+			ldCfg: minLinuxDoURLs(),
+			want:  true,
+		},
+	}
+	for _, tc := range linuxDoCases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newAuthServiceWithLinuxDoCfg(tc.settings, tc.ldCfg)
+			got := svc.canBypassRegistrationDisabledForOAuth(context.Background(), "linuxdo")
 			require.Equal(t, tc.want, got)
 		})
 	}
