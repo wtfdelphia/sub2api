@@ -1,0 +1,1356 @@
+diff --git a/docs/AUTH_REGISTRATION_LINUXDO_ANALYSIS.md b/docs/AUTH_REGISTRATION_LINUXDO_ANALYSIS.md
+new file mode 100644
+index 00000000..11111111
+--- /dev/null
++++ b/docs/AUTH_REGISTRATION_LINUXDO_ANALYSIS.md
+@@ -0,0 +1,368 @@
++# 安全与认证：开放注册 / 邮箱验证 / LinuxDo Connect / 邀请码 关联分析
++
++> 分析方式：CodeGraph 索引（约 2,519 文件 / 78,786 节点）+ 源码交叉阅读  
++> 范围：管理端「系统设置 → 安全与认证」相关开关，以及注册/登录链路  
++> 日期：2026-07-15
++
++---
++
++## 1. 结论速览
++
++| 开关 | Setting Key | 默认 | 主要作用 |
++|------|-------------|------|----------|
++| **开放注册** | `registration_enabled` | 读失败时视为 `false`（安全默认关闭） | 是否允许创建**新用户** |
++| **邮箱验证** | `email_verify_enabled` | `false` | 邮箱密码注册必须验码；同时驱动 LinuxDo 首次注册走「补邮箱/建号」分支 |
++| **邀请码注册** | `invitation_code_enabled` | `false` | 新用户创建时必须消耗一条 `type=invitation` 的兑换码 |
++| **LinuxDo Connect** | `linuxdo_connect_enabled`（可回退配置文件） | 配置默认 `false` | 是否在登录页展示 LinuxDo OAuth |
++
++**核心关系（一句话）**：
++
++1. **开放注册**是新用户总闸：邮箱注册与 LinuxDo 首次建号都要过它（钉钉企业豁免除外，LinuxDo 无豁免）。
++2. **邮箱验证**对邮箱注册是「验码门」；对 LinuxDo 是「流程分流开关」——开启后禁止直接用合成邮箱静默建号，改为 pending session + 补邮箱/建号表单。
++3. **邀请码**是另一道独立门：与邮箱验证正交；开启后邮箱注册、LinuxDo 静默建号、OAuth 补邮箱建号都要有效邀请码。
++4. **邀请码从哪来**：管理员在 **兑换码管理**（`/admin/redeem`）批量生成 `type=invitation` 的 `RedeemCode`，**不是**用户自助生成，也**不是**推广返利用的 `aff_code`。
++
++---
++
++## 2. 管理端 UI 与配置落点
++
++### 2.1 安全与认证页（`SettingsView` → `activeTab === 'security'`）
++
++同一 Tab 内包含：
++
++- **注册设置**卡片
++  - 开放注册 `registration_enabled`
++  - 邮箱验证 `email_verify_enabled`
++  - 邮箱域名白名单
++  - 优惠码 / **邀请码注册** / 忘记密码（依赖邮箱验证）/ 2FA
++- **LinuxDo Connect OAuth**卡片
++  - `linuxdo_connect_enabled` + Client ID / Secret / Redirect URL
++- 另有「认证来源默认值」中的 **强制第三方注册补邮箱** `force_email_on_third_party_signup`
++
++对应前端：
++
++- [frontend/src/views/admin/SettingsView.vue](../frontend/src/views/admin/SettingsView.vue)
++- 文案：[frontend/src/i18n/locales/zh/admin/settings.ts](../frontend/src/i18n/locales/zh/admin/settings.ts)
++
++### 2.2 后端读写
++
++| 能力 | 文件 |
++|------|------|
++| 开关查询 | `backend/internal/service/setting_features.go`（`IsRegistrationEnabled` / `IsEmailVerifyEnabled` / `IsInvitationCodeEnabled`） |
++| 管理端更新 | `backend/internal/service/setting_update.go` |
++| 公开设置（登录/注册页） | `backend/internal/service/setting_public.go` → `registration_enabled` / `email_verify_enabled` / `invitation_code_enabled` / `linuxdo_oauth_enabled` |
++| LinuxDo 生效配置 | `backend/internal/service/setting_oauth.go` → `GetLinuxDoConnectOAuthConfig`（DB 覆盖 + `config.yaml` 回退） |
++
++公开 API 中 LinuxDo 字段名为 `linuxdo_oauth_enabled`，由 `linuxdo_connect_enabled`（或配置 `linuxdo_connect.enabled`）计算。
++
++---
++
++## 3. 三个开关的职责边界
++
++### 3.1 开放注册 `registration_enabled`
++
++```text
++IsRegistrationEnabled == false
++  → 邮箱 RegisterWithVerification 直接失败 ErrRegDisabled
++  → OAuth 首次登录（新用户）失败 ErrRegDisabled
++     例外：钉钉 signupSource=dingtalk 且 internal_only + bypass_registration
++  → 已存在用户登录 / 已绑定 identity 登录：不受影响
++```
++
++实现：`AuthService.RegisterWithVerification`、`loginOrRegisterOAuthWithTokenPair`  
++（`backend/internal/service/auth_service.go`）
++
++**LinuxDo 注意**：没有「关闭开放注册仍允许 LinuxDo 建号」的旁路。关掉开放注册后，LinuxDo 只能登录已有账号 / 绑定已有账号。
++
++### 3.2 邮箱验证 `email_verify_enabled`
++
++#### 邮箱密码注册
++
++开启时：
++
++1. 必须配置邮件服务，否则拒绝注册（防绕过）
++2. 必须提交 `verify_code`，经 `EmailService.VerifyCode` 校验
++
++关闭时：可不带验证码直接注册（仍受开放注册、邀请码、域名白名单等约束）。
++
++#### 副作用
++
++| 能力 | 与邮箱验证关系 |
++|------|----------------|
++| 忘记密码 | 仅当邮箱验证开启时才可启用 |
++| TOTP 开/关身份确认 | 邮箱验证开 → 用邮件验证码；关 → 用密码 |
++| LinuxDo / 其它第三方首次注册 | 见第 4 节：改变 OAuth **流程形态**，不是「校验 LinuxDo 上游邮箱已验证」 |
++
++### 3.3 邀请码注册 `invitation_code_enabled`
++
++开启时：
++
++- 邮箱注册：缺码 → `INVITATION_CODE_REQUIRED`；无效/已用/非 invitation 类型 → `INVITATION_CODE_INVALID`
++- OAuth 新用户：缺码 → `OAUTH_INVITATION_REQUIRED`（handler/前端映射为 `invitation_required`）
++- 成功建号后：`redeemRepo.Use(codeID, userID)` 标记已用
++
++关闭时：注册链路不读、不消耗邀请码。
++
++校验公共逻辑：
++
++- 邮箱：`RegisterWithVerification`
++- OAuth：`validateOAuthRegistrationInvitation`（`backend/internal/service/auth_oauth_email_flow.go`）
++- 预校验公开接口：`POST /api/v1/auth/validate-invitation-code`
++
++---
++
++## 4. 与 LinuxDo Connect 的关联关系
++
++### 4.1 LinuxDo 登录安全模型（与邮箱验证/邀请码正交但会叠加）
++
++LinuxDo callback **不会**用上游真实邮箱直接当本地主邮箱建号，避免邮箱撞库接管：
++
++- 本地主邮箱使用合成邮箱：`linuxdo-{subject}@linuxdo-connect.invalid`
++- Identity 绑定：`provider_type/key=linuxdo` + `provider_subject`
++- 上游真实邮箱仅作 `compat_email`：若本地已有同邮箱用户，可提示「绑定已有账号」
++
++代码：`LinuxDoOAuthCallback`、`linuxDoSyntheticEmail`  
++（`backend/internal/handler/auth_linuxdo_oauth.go`）
++
++### 4.2 LinuxDo 首次登录决策树
++
++```text
++LinuxDo OAuth 回调成功
++  ├─ 已有 AuthIdentity → pending session → 登录（不看开放注册/邀请码/邮箱验证）
++  ├─ compat_email 命中本地用户 → 选择/绑定流程
++  └─ 全新用户
++        ├─ 邮箱验证 OFF 且 强制补邮箱 OFF
++        │     → 尝试 LoginOrRegisterOAuthWithTokenPair(合成邮箱, invitation="")
++        │           ├─ 邀请码 OFF 且 开放注册 ON → 直接建号发 token
++        │           ├─ 邀请码 ON → ErrOAuthInvitationRequired
++        │           │     → 进入 pending（前端 needsInvitation / complete-registration）
++        │           └─ 开放注册 OFF → 失败
++        └─ 邮箱验证 ON 或 强制补邮箱 ON
++              → createLinuxDoOAuthChoicePendingSession
++                    step=create_account_required, email_binding_required=true
++              → 前端 PendingOAuthCreateAccountForm
++                    （本地邮箱 + 密码 + [验证码] + [邀请码]）
++              → RegisterOAuthEmailAccount / FinalizeOAuthEmailAccount
++```
++
++关键判断（callback）：
++
++```go
++emailVerificationRequired := authService.IsEmailVerifyEnabled(ctx)
++forceEmailOnSignup := isForceEmailOnThirdPartySignup(ctx)
++if compatEmailUser == nil && !emailVerificationRequired && !forceEmailOnSignup {
++    // 尝试静默 LoginOrRegisterOAuth...
++}
++// 否则或邀请码阻塞后 → createLinuxDoOAuthChoicePendingSession
++```
++
++### 4.3 三开关 × LinuxDo 组合矩阵
++
++| 开放注册 | 邮箱验证 | 邀请码 | LinuxDo 新用户行为 |
++|---------|----------|--------|-------------------|
++| OFF | * | * | 无法建号；仅可登录/绑定已有用户 |
++| ON | OFF | OFF | 合成邮箱静默建号 + 发 token |
++| ON | OFF | ON | 静默建号失败 → 前端要邀请码 → `complete-registration` |
++| ON | ON | OFF | 禁止静默建号 → 补邮箱建号表单（需邮件验证码） |
++| ON | ON | ON | 补邮箱建号 + 邀请码（表单内 `invitation_code_enabled`） |
++| ON | OFF | OFF，但 `force_email_on_third_party_signup=ON` | 同「邮箱验证 ON」分流（强制本地邮箱） |
++
++### 4.4 邮箱验证 vs OAuth 补邮箱验码（易混点）
++
++| 场景 | 是否看 `email_verify_enabled` |
++|------|-------------------------------|
++| 邮箱密码注册的验证码 | **是**（总开关） |
++| OAuth「补邮箱建号」里的验证码 | **强制校验**（`VerifyOAuthEmailCode` 注释写明：**故意不依赖**全局注册邮箱验证开关） |
++| 为何 callback 仍读 `IsEmailVerifyEnabled` | 用于决定是否**进入**补邮箱流程；进入后验码逻辑独立 |
++
++因此：
++
++- 仅开「强制第三方补邮箱」、关「邮箱验证」时：LinuxDo 仍会要求用户填本地邮箱并完成 OAuth 侧验码（需邮件服务可用）。
++- 开「邮箱验证」会额外影响密码注册、忘记密码、TOTP 确认等全局行为。
++
++### 4.5 与邀请码的衔接点
++
++1. **静默路径**：`loginOrRegisterOAuthWithTokenPair` 在 `IsInvitationCodeEnabled` 时要求 `invitationCode`，否则 `ErrOAuthInvitationRequired`。
++2. **complete-registration**：`CompleteLinuxDoOAuthRegistration` 把前端提交的 `invitation_code` 传入 `LoginOrRegisterOAuthWithTokenPairAndPromoCode`，`signupSource="linuxdo"`。
++3. **补邮箱建号路径**：`RegisterOAuthEmailAccount` → `validateOAuthRegistrationInvitation`；最终在 `FinalizeOAuthEmailAccount` 中 `Use` 邀请码（可回滚 `restoreOAuthRegistrationInvitation`）。
++
++前端：
++
++- `frontend/src/views/auth/LinuxDoCallbackView.vue`：`needsInvitation` / `completeLinuxDoOAuthRegistration`
++- `frontend/src/components/auth/PendingOAuthCreateAccountForm.vue`：按公开设置展示邀请码输入
++
++### 4.6 与「开放注册」的衔接点
++
++- 静默与补邮箱建号都会检查 `IsRegistrationEnabled`。
++- LinuxDo **不能**像钉钉那样 `canBypassRegistrationDisabledForOAuth`。
++- 已绑定 identity 的老用户登录不检查开放注册。
++
++---
++
++## 5. 邀请码从哪里来？
++
++### 5.1 数据模型
++
++邀请码 = 兑换码表中的一种类型：
++
++```go
++// backend/internal/domain/constants.go
++RedeemTypeInvitation = "invitation"
++```
++
++结构体：`RedeemCode`（`code` / `type` / `value` / `status` / `used_by` / `used_at` / `expires_at` …）  
++邀请码的 `value` 固定为 `0`（无余额/并发面值，仅作注册凭证）。
++
++### 5.2 谁生成？
++
++**仅管理员**在后台生成，用户端不能自助生成注册邀请码。
++
++| 步骤 | 位置 |
++|------|------|
++| UI | 管理端 **兑换码** 页 `/admin/redeem` → `frontend/src/views/admin/RedeemView.vue` |
++| 选择类型 | `type = invitation`（文案：邀请码用于限制用户注册，使用后自动标记为已使用） |
++| API | `POST /api/v1/admin/redeem-codes/generate` |
++| Handler | `backend/internal/handler/admin/redeem_handler.go` `GenerateRedeemCodesRequest.Type` 含 `invitation` |
++| Service | `RedeemService.GenerateCodes` → 循环 `GenerateRandomCode()` → `CreateBatch` |
++
++### 5.3 码的形态
++
++`GenerateRandomCode`：
++
++- 16 字节加密随机数 → hex
++- 格式：`XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX`（大写，四段）
++
++单次生成上限：handler 绑定 `max=100`；service 另有 `count ≤ 1000` 防护。  
++可配置过期时间（`expires_at` / `expires_in_days`）。
++
++### 5.4 如何使用 / 不能怎样用
++
++| 用法 | 说明 |
++|------|------|
++| 注册时提交 | 邮箱注册 body 的 `invitation_code`；LinuxDo complete-registration / 补邮箱建号表单 |
++| 预校验 | `POST /api/v1/auth/validate-invitation-code`（注册页防抖校验） |
++| 消费时机 | 用户创建成功后 `Use`；OAuth 补邮箱路径可在失败时 restore |
++| **不能**当普通兑换码 | `RedeemService.Redeem` 对 invitation 返回：`invitation codes can only be used during registration` |
++
++### 5.5 与「推广邀请码 / aff_code」区分
++
++系统里有两套易混概念：
++
++| 概念 | 存储/字段 | 作用 |
++|------|-----------|------|
++| **注册邀请码**（本文） | `redeem_codes`，`type=invitation` | 准入控制：有码才能注册 |
++| **推广返利码** `aff_code` | 用户 affiliate 档案 | 绑定邀请人、返利；注册失败不影响主流程 |
++
++开启「邀请码注册」时，用户需要的是 **管理员发的 invitation 兑换码**，不是用户自己的推广码。
++
++### 5.6 运维操作建议
++
++1. 管理端打开「邀请码注册」。
++2. 进入 **兑换码管理**，类型选 **邀请码**，填写数量（与可选过期），生成。
++3. 导出 / 复制码，通过站外渠道分发给目标用户。
++4. 用户在注册页或 LinuxDo 回调页填入；用后状态变 `used`，不可复用。
++5. 关闭「邀请码注册」后，历史 invitation 码不再被注册链路校验；但普通 Redeem 接口仍拒绝用 invitation 类型兑余额。
++
++---
++
++## 6. 端到端流程（简图）
++
++### 6.1 邮箱注册
++
++```text
++RegisterView
++  → 读 public settings（registration / email_verify / invitation_code）
++  → [可选] validate-invitation-code
++  → [可选] 发邮件验证码
++  → POST /auth/register { email, password, verify_code?, invitation_code?, aff_code? }
++       AuthService.RegisterWithVerification
++         ① 开放注册 ② 邀请码 ③ 邮箱验证码 ④ 建用户 ⑤ Use 邀请码 ⑥ aff 绑定
++```
++
++### 6.2 LinuxDo（邀请码 ON，邮箱验证 OFF）
++
++```text
++Login → LinuxDo authorize → callback
++  → LoginOrRegisterOAuth(..., invitation="") 
++  → ErrOAuthInvitationRequired
++  → pending session / 前端 needsInvitation
++  → POST /auth/oauth/linuxdo/complete-registration { invitation_code }
++  → LoginOrRegisterOAuthWithTokenPairAndPromoCode(..., invitation, source=linuxdo)
++  → 建号 + Use 邀请码 + 绑定 AuthIdentity + 发 token
++```
++
++### 6.3 LinuxDo（邮箱验证 ON 或强制补邮箱 ON）
++
++```text
++callback → create_account_required pending
++  → PendingOAuthCreateAccountForm
++       email + password + verify_code + [invitation_code]
++  → RegisterOAuthEmailAccount + 绑定 identity + Finalize（Use 邀请码）
++```
++
++---
++
++## 7. CodeGraph 关键符号索引
++
++| 符号 | 路径 | 角色 |
++|------|------|------|
++| `IsRegistrationEnabled` | `setting_features.go` | 开放注册 |
++| `IsEmailVerifyEnabled` | `setting_features.go` | 邮箱验证 |
++| `IsInvitationCodeEnabled` | `setting_features.go` | 邀请码开关（callers: Register / OAuth / ValidateInvitationCode 等） |
++| `RegisterWithVerification` | `auth_service.go` | 邮箱注册总流程 |
++| `loginOrRegisterOAuthWithTokenPair` | `auth_service.go` | OAuth 登录/注册（含邀请码） |
++| `validateOAuthRegistrationInvitation` | `auth_oauth_email_flow.go` | OAuth 邀请码校验 |
++| `LinuxDoOAuthCallback` | `auth_linuxdo_oauth.go` | LinuxDo 回调与分流 |
++| `CompleteLinuxDoOAuthRegistration` | `auth_linuxdo_oauth.go` | 邀请码完成注册 |
++| `GenerateCodes` / `GenerateRandomCode` | `redeem_service.go` | 邀请码生成 |
++| `RedeemTypeInvitation` | `domain/constants.go` | 类型常量 |
++
++CodeGraph 查询参考：
++
++```bash
++codegraph query IsInvitationCodeEnabled
++codegraph callers IsInvitationCodeEnabled
++codegraph impact IsInvitationCodeEnabled
++codegraph query CompleteLinuxDoOAuthRegistration
++```
++
++---
++
++## 8. 设计意图与注意点
++
++1. **开放注册**管「能不能出现新用户」；**邀请码**管「谁有资格」；**邮箱验证**管「邮箱通道可信度」并改变第三方首注 UX。
++2. LinuxDo 用合成邮箱做主账号键，真实邮箱只做兼容绑定，避免 OAuth 邮箱冒充本地用户。
++3. 邀请码复用兑换码基础设施，但业务上**只能在注册时消费**，防止当余额码误用。
++4. 钉钉存在 `bypass_registration` 企业豁免；**LinuxDo / OIDC / 微信没有等价豁免**，关闭开放注册即关闭其自助建号。
++5. `force_email_on_third_party_signup` 与 `email_verify_enabled` 都会把 LinuxDo 推入补邮箱流程，但全局副作用不同（忘记密码、邮箱注册验码等）。
++
++---
++
++## 9. 相关文件清单
++
++**后端**
++
++- `backend/internal/service/setting_features.go`
++- `backend/internal/service/setting_public.go`
++- `backend/internal/service/setting_oauth.go`
++- `backend/internal/service/auth_service.go`
++- `backend/internal/service/auth_oauth_email_flow.go`
++- `backend/internal/service/redeem_service.go`
++- `backend/internal/handler/auth_handler.go`（Register / ValidateInvitationCode）
++- `backend/internal/handler/auth_linuxdo_oauth.go`
++- `backend/internal/handler/auth_oauth_pending_flow.go`
++- `backend/internal/handler/admin/redeem_handler.go`
++- `deploy/config.example.yaml`（`linuxdo_connect` 段）
++
++**前端**
++
++- `frontend/src/views/admin/SettingsView.vue`（安全与认证）
++- `frontend/src/views/admin/RedeemView.vue`（邀请码生成）
++- `frontend/src/views/auth/RegisterView.vue`
++- `frontend/src/views/auth/LoginView.vue` / `LinuxDoCallbackView.vue`
++- `frontend/src/components/auth/PendingOAuthCreateAccountForm.vue`
++- `frontend/src/api/auth.ts` / `frontend/src/api/admin/redeem.ts`
++
++---
++
++*本文档由 CodeGraph 辅助静态分析生成，描述以当前仓库实现为准。*
+diff --git a/docs/LINUXDO_BYPASS_REGISTRATION_PROPOSAL.md b/docs/LINUXDO_BYPASS_REGISTRATION_PROPOSAL.md
+new file mode 100644
+index 00000000..11111111
+--- /dev/null
++++ b/docs/LINUXDO_BYPASS_REGISTRATION_PROPOSAL.md
+@@ -0,0 +1,535 @@
++# LinuxDo `bypass_registration` 改造方案
++
++> 目标：为 LinuxDo Connect 增加 `linuxdo_connect_bypass_registration`，**完全对齐钉钉**「关开放注册仍允许某渠道建号」。  
++> 依据：钉钉现网实现 + [AUTH_REGISTRATION_LINUXDO_ANALYSIS.md](./AUTH_REGISTRATION_LINUXDO_ANALYSIS.md) + 注册旁路难度分析。  
++> 关联方案：[LINUXDO_EMAIL_BYPASS_PROPOSAL.md](./LINUXDO_EMAIL_BYPASS_PROPOSAL.md)（邮箱关联豁免，与本方案正交）。  
++> 范围：设计方案；**已落地实施（见仓库代码）**。  
++> 日期：2026-07-15
++>
++> **实施状态（2026-07-15）**：linuxdo_connect_bypass_registration 配置面 + service canBypass + handler signupBlocked 已合并；默认 false；无 schema migration。
++
++---
++
++## 1. 背景与问题
++
++### 1.1 运维诉求
++
++希望配置为：
++
++| 开关 | 期望 |
++|------|------|
++| 开放注册 `registration_enabled` | **OFF**（关闭邮箱密码自助注册） |
++| LinuxDo Connect | **ON** |
++| **新增** `linuxdo_connect_bypass_registration` | **ON** |
++
++效果：
++
++- 邮箱 `/auth/register`：**仍禁止**
++- 已有用户 / 已绑定 LinuxDo identity：**可登录**
++- **全新** LinuxDo 用户：仍允许建号（与钉钉「开放钉钉注册」同语义）
++
++### 1.2 现状
++
++| 能力 | 钉钉 | LinuxDo |
++|------|------|---------|
++| 配置开关 | `dingtalk_connect_bypass_registration` | **无** |
++| Service 旁路 | `canBypassRegistrationDisabledForOAuth` 仅 `dingtalk` | 恒 `false` |
++| 信任边界 | 必须 `corp_restriction_policy=internal_only` | 无企业 corp 模型 |
++| Handler 提前分流 | `isDingTalkSignupBlocked` → `bind_login_required` | **无** `signupBlocked`；`create_account_allowed` 写死 `true` |
++
++关闭开放注册后，LinuxDo 新用户在 service 层直接 `ErrRegDisabled`（`loginOrRegisterOAuthWithTokenPair` / 补邮箱建号路径）。
++
++### 1.3 钉钉权威语义（必须对齐）
++
++钉钉管理端文案：
++
++- 标题：`开放钉钉注册`
++- Hint：`即使「开放注册」关闭时也可以通过钉钉登录来注册`
++
++技术条件（**两者同时满足**才旁路）：
++
++```text
++cfg.Enabled
++AND cfg.BypassRegistration
++AND cfg.CorpRestrictionPolicy == "internal_only"
++```
++
++UI 上该 Toggle **仅在** `corp_restriction_policy === 'internal_only'` 时展示；保存时若策略不是 internal_only，后端会强制 `bypass_registration=false`。
++
++Service：
++
++```go
++func (s *AuthService) canBypassRegistrationDisabledForOAuth(ctx context.Context, signupSource string) bool {
++    if signupSource != "dingtalk" { return false }
++    cfg, err := s.settingService.GetDingTalkConnectOAuthConfig(ctx)
++    if err != nil || !cfg.Enabled || !cfg.BypassRegistration { return false }
++    return cfg.CorpRestrictionPolicy == "internal_only"
++}
++```
++
++Handler（callback 早期）：
++
++```go
++// 注册关且未豁免 → signupBlocked=true
++// → create_account_allowed=false，必要时 step=bind_login_required
++// 避免用户填完补邮箱表单才收到 REGISTRATION_DISABLED
++```
++
++---
++
++## 2. 目标与非目标
++
++### 2.1 目标
++
++1. 新增 `linuxdo_connect_bypass_registration`，语义与钉钉「开放 xx 注册」一致：  
++   **`registration_enabled=false` 时，仍允许经 LinuxDo OAuth 创建本地用户**。
++2. Service 层统一走扩展后的 `canBypassRegistrationDisabledForOAuth`，覆盖静默建号、complete-registration、补邮箱建号。
++3. Handler 层补齐 `isLinuxDoSignupBlocked` + pending payload（`create_account_allowed` / `bind_login_required`），对齐钉钉 UX。
++4. 默认 **关闭**；升级行为不变。
++5. **不**绕过 Backend Mode、邀请码、邮箱验证 / force_email（与钉钉一致：旁路只针对 `registration_enabled`）。
++
++### 2.2 非目标
++
++- 不修改邮箱密码注册门禁。
++- 不把旁路扩散到微信 / OIDC / GitHub / Google（可二期通用化）。
++- 不替代 [LINUXDO_EMAIL_BYPASS_PROPOSAL.md](./LINUXDO_EMAIL_BYPASS_PROPOSAL.md) 的邮箱关联豁免。
++- 不在本方案中实现 LinuxDo trust level / 用户组 allowlist（列为强烈建议的**可选**加固，见 §4.3）。
++
++### 2.3 「完全对齐」的含义
++
++| 对齐项 | 钉钉 | LinuxDo 本方案 |
++|--------|------|----------------|
++| Setting 命名 | `*_bypass_registration` | `linuxdo_connect_bypass_registration` |
++| 文案结构 | 「开放钉钉注册」 | 「开放 LinuxDo 注册」 |
++| Service API | `canBypassRegistrationDisabledForOAuth` | **同一函数**扩展分支 |
++| 建号门表达式 | `IsRegistrationEnabled \|\| canBypass(...)` | 不变，仅扩展 canBypass |
++| Callback 提前分流 | `signupBlocked` | 镜像实现 |
++| 默认值 | false | false |
++| 与 Backend Mode | 不旁路 | 不旁路 |
++| 信任边界 | `internal_only` | **无 corp**：用「启用 + flag」对齐**开关形态**；用文档/可选邀请码约束补**风险**（§4） |
++
++> 说明：钉钉的 `internal_only` 是**企业身份硬约束**，LinuxDo 协议层没有等价字段。  
++> 「完全对齐」指 **产品开关 + 代码路径 + UX 分流 + 默认安全** 对齐；信任模型差异必须在 UI Hint 与运维文档中显式写出，避免运维误以为「和钉钉一样安全」。
++
++---
++
++## 3. 现状卡点清单（改造对照表）
++
++| # | 位置 | 现状 | 本方案动作 |
++|---|------|------|------------|
++| 1 | `canBypassRegistrationDisabledForOAuth` | 仅 dingtalk | **扩展 linuxdo 分支** |
++| 2 | `loginOrRegisterOAuthWithTokenPair` | 用 canBypass | 随 #1 自动生效 |
++| 3 | `RegisterOAuthEmailAccount` / `RegisterVerifiedOAuthEmailAccount` | 用 canBypass | 随 #1 |
++| 4 | `CompleteLinuxDoOAuthRegistration` | 调 #2 | 随 #1 |
++| 5 | `LinuxDoOAuthCallback` 静默建号 | 调 #2；失败当 session_error | 随 #1；错误体验可选优化 |
++| 6 | `createLinuxDoOAuthChoicePendingSession` | `create_account_allowed: true` 写死 | **必须改**：接入 signupBlocked |
++| 7 | LinuxDo 无 `isLinuxDoSignupBlocked` | 缺 | **新增**（对齐钉钉） |
++| 8 | 补邮箱 pending create-account | `ensureBackendMode` + RegisterOAuthEmail | 随 #1；Backend Mode 仍拦 |
++| 9 | `createEmailOAuthUser` | **硬编码**只看 IsRegistrationEnabled | LinuxDo 主路径不用；**可不改**（或顺手统一，非必须） |
++| 10 | 邮箱 `RegisterWithVerification` | 只看开放注册 | **禁止**被本 flag 影响 |
++| 11 | 前端 `LinuxDoCallbackView` | 已有 create/bind 结构 | 优先靠后端 payload；必要时认 `create_account_allowed` |
++| 12 | 配置 / Admin UI / i18n / audit | 无字段 | **新增** |
++
++`ensureBackendModeAllowsNewUserLogin`：**不是**开放注册门，本方案 **绝不** 因 bypass_registration 而放行 Backend Mode。
++
++---
++
++## 4. 推荐设计
++
++### 4.1 配置模型
++
++#### Setting Key
++
++```text
++linuxdo_connect_bypass_registration   // bool, 默认 false
++```
++
++#### Config
++
++```go
++// LinuxDoConnectConfig
++BypassRegistration bool `mapstructure:"bypass_registration"`
++```
++
++`deploy/config.example.yaml`：
++
++```yaml
++linuxdo_connect:
++  enabled: false
++  # ...
++  # 开放 LinuxDo 注册：即使全局「开放注册」关闭，仍允许通过 LinuxDo 登录创建账号。
++  # 默认 false。LinuxDo 无企业 corp 限制，开启前请评估风险；建议同时开启「邀请码注册」。
++  bypass_registration: false
++```
++
++生效优先级：与现有 LinuxDo 字段一致 —— **DB 覆盖 YAML**（`GetLinuxDoConnectOAuthConfig`）。
++
++#### 管理端
++
++- DTO / update / parse / audit 增加字段。
++- `SettingsView` LinuxDo 卡片：在 `linuxdo_connect_enabled` 时展示 Toggle。
++- i18n（对齐钉钉语气）：
++
++| key | zh 建议 |
++|-----|---------|
++| `bypassRegistration` | 开放 LinuxDo 注册 |
++| `bypassRegistrationHint` | 即使「开放注册」关闭时也可以通过 LinuxDo 登录来注册。注意：LinuxDo 无企业成员限制，开启后任意成功完成 OAuth 的 LinuxDo 用户均可建号；建议同时开启邀请码。 |
++
++### 4.2 Service：扩展 `canBypassRegistrationDisabledForOAuth`
++
++```go
++func (s *AuthService) canBypassRegistrationDisabledForOAuth(ctx context.Context, signupSource string) bool {
++    switch signupSource {
++    case "dingtalk":
++        cfg, err := s.settingService.GetDingTalkConnectOAuthConfig(ctx)
++        if err != nil || !cfg.Enabled || !cfg.BypassRegistration {
++            return false
++        }
++        return cfg.CorpRestrictionPolicy == "internal_only"
++
++    case "linuxdo":
++        cfg, err := s.settingService.GetLinuxDoConnectOAuthConfig(ctx)
++        if err != nil || !cfg.Enabled || !cfg.BypassRegistration {
++            return false
++        }
++        // LinuxDo 无 internal_only 等价物：Enabled + BypassRegistration 即旁路。
++        // 安全默认：配置读取失败 → false（已由 err 分支覆盖）。
++        return true
++
++    default:
++        return false
++    }
++}
++```
++
++建号门（**保持现有表达式，不改调用方结构**）：
++
++```text
++allowNewUser =
++  IsRegistrationEnabled(ctx)
++  OR canBypassRegistrationDisabledForOAuth(ctx, signupSource)
++```
++
++已调用该表达式的路径（linuxdo 自动受益）：
++
++- `loginOrRegisterOAuthWithTokenPair`（`signupSource="linuxdo"`）
++- `RegisterOAuthEmailAccount` / `RegisterVerifiedOAuthEmailAccount`
++
++### 4.3 信任边界：与钉钉的差异与补强
++
++| | 钉钉 | LinuxDo（本方案默认） |
++|--|------|----------------------|
++| 硬约束 | `internal_only` + 企业 corp 校验 | **无**（OAuth subject 即互联网用户） |
++| 风险 | 限本企业员工 | 开 bypass ≈「隐式对全 LinuxDo 开放注册」 |
++
++**推荐产品策略（实现时三选一，写入设置校验）：**
++
++| 策略 | 强度 | 实现成本 | 建议 |
++|------|------|----------|------|
++| **P0 仅 flag** | 弱 | 最低 | 可做 MVP，Hint 强警告 |
++| **P1 flag + 强制邀请码** | 中 | 低 | **推荐默认产品策略**：`bypass_registration=true` 保存时要求 `invitation_code_enabled=true`，否则拒绝或自动提示 |
++| **P2 flag + trust level allowlist** | 强 | 中高 | 二期：解析 LinuxDo userinfo trust_level 等 |
++
++本方案正文按 **P0 功能对齐钉钉路径** 写全；**P1 作为强烈建议的保存校验**，在 §5.1 给出伪代码，避免「完全对齐开关」却毫无运营刹车。
++
++### 4.4 Handler：对齐 `signupBlocked` UX
++
++#### 4.4.1 新增
++
++```go
++// isLinuxDoSignupBlocked：注册总开关关闭且未开启 LinuxDo 注册旁路时返回 true。
++// 镜像 isDingTalkSignupBlocked / canBypassRegistrationDisabledForOAuth(linuxdo)。
++func (h *AuthHandler) isLinuxDoSignupBlocked(ctx context.Context) bool {
++    if h.settingSvc == nil {
++        return false // 或 true：更 fail-closed；建议与钉钉一致：settingSvc nil 时 false 仅因钉钉现状，
++                     // 更稳妥为 true。实现时二选一，单测钉死。推荐 fail-closed: true
++    }
++    if h.settingSvc.IsRegistrationEnabled(ctx) {
++        return false
++    }
++    cfg, err := h.settingSvc.GetLinuxDoConnectOAuthConfig(ctx)
++    if err != nil || !cfg.Enabled || !cfg.BypassRegistration {
++        return true
++    }
++    return false
++}
++```
++
++> 钉钉 `isDingTalkSignupBlocked` 在 `settingSvc==nil` 时返回 false；LinuxDo 建议 **fail-closed（true）**，并在测试中明确。若追求「逐行镜像」可保持 false，但文档标注差异。
++
++#### 4.4.2 改造 `createLinuxDoOAuthChoicePendingSession`
++
++增加参数 `signupBlocked bool`（与钉钉 choice session 一致）：
++
++```text
++create_account_allowed = !signupBlocked
++
++if signupBlocked {
++  // 无 compat 可绑时：step=bind_login_required
++  // 有 compat 命中：仍可 bind 已有账号
++  // 禁止引导 create_account / 补邮箱建号（用户填完只会失败）
++}
++```
++
++可复用或抽取与钉钉相同的：
++
++```go
++func bindLoginCompletionResponse(redirectTo string) map[string]any {
++    return map[string]any{
++        "step":                      "bind_login_required",
++        "existing_account_bindable": true,
++        "create_account_allowed":    false,
++        "redirect":                  redirectTo,
++    }
++}
++```
++
++#### 4.4.3 Callback 决策（与钉钉同构）
++
++```text
++LinuxDo callback（login intent，无已有 identity）
++  signupBlocked = isLinuxDoSignupBlocked(ctx)
++  email 分流（邮箱验证 / force_email / bypass_email）照旧
++
++  if 可走静默合成邮箱路径:
++      if signupBlocked:
++          → pending bind_login_required（不要 LoginOrRegister）
++      else:
++          → LoginOrRegister...（此时 canBypass 可在注册关时放行）
++          → 邀请码不足 → invitation_required pending
++
++  if 进入 choice / create_account pending:
++      → 带上 signupBlocked
++      → create_account_allowed = !signupBlocked
++```
++
++`CompleteLinuxDoOAuthRegistration` / pending create-account：
++
++- 保持 `ensureBackendModeAllowsNewUserLogin`
++- 建号依赖 service canBypass（无需在 handler 再写一套注册判断，避免双源）
++- 可选：signupBlocked 时 complete-registration 直接 403，防绕过前端
++
++### 4.5 与其它开关的优先级
++
++```text
++1. Backend Mode ON
++     → 禁止新用户登录/建号（本 bypass 无效）
++2. 已有 AuthIdentity
++     → 登录（不看开放注册 / bypass）
++3. compat_email 命中
++     → 绑定流（不建第二账号）
++4. registration_enabled ON
++     → 正常允许建号（bypass 无意义但无害）
++5. registration_enabled OFF
++     → bypass_registration ON 且 LinuxDo enabled → 允许 LinuxDo 建号
++     → 否则 signupBlocked，仅绑定
++6. invitation_code_enabled
++     → 仍要有效邀请码（与钉钉相同：旁路不管邀请码）
++7. email_verify / force_email / email-bypass
++     → 只影响是否补邮箱，不改变 registration 旁路本身
++```
++
++### 4.6 组合矩阵
++
++前提：LinuxDo 启用；全新用户；无 identity；Backend Mode OFF。
++
++| 开放注册 | bypass_registration | 邮箱验证 | 期望 |
++|---------|---------------------|----------|------|
++| ON | * | OFF | 静默建号（现网） |
++| ON | * | ON | 补邮箱或静默（视 email-bypass 方案） |
++| **OFF** | **OFF** | * | **不可建号**；bind_login / 已有账号 |
++| **OFF** | **ON** | OFF | **可静默建号** |
++| **OFF** | **ON** | ON | **可建号**但走补邮箱（除非另开 email-bypass） |
++| OFF | ON | * + 邀请码 ON | 建号前仍要邀请码 |
++| OFF | ON | * + Backend Mode ON | **仍禁止**新用户 |
++
++邮箱密码注册：任意组合下，只要 `registration_enabled=OFF` → 失败。
++
++---
++
++## 5. 代码改动清单
++
++### 5.1 后端
++
++| 文件 | 改动 |
++|------|------|
++| `backend/internal/config/config.go` | `LinuxDoConnectConfig.BypassRegistration` |
++| `backend/internal/service/domain_constants.go` | `SettingKeyLinuxDoConnectBypassRegistration` |
++| `backend/internal/service/setting_oauth.go` | `GetLinuxDoConnectOAuthConfig` 合并字段 |
++| `backend/internal/service/setting_parse.go` / `setting_update.go` / `settings_view.go` | 读写 |
++| `backend/internal/service/auth_service.go` | 扩展 `canBypassRegistrationDisabledForOAuth` |
++| `backend/internal/handler/dto/settings.go` | 响应字段 |
++| `backend/internal/handler/admin/setting_handler*.go` | update / audit / 响应；可选 P1 校验 |
++| `backend/internal/handler/auth_linuxdo_oauth.go` | `isLinuxDoSignupBlocked`、choice session、callback 分流 |
++| `deploy/config.example.yaml` | 示例 + 风险注释 |
++| 测试 | §6 |
++
++**P1 保存校验（推荐）伪代码：**
++
++```go
++if req.LinuxDoConnectBypassRegistration && !req.InvitationCodeEnabled {
++    // 选项 A：硬拒绝
++    // return BadRequest("LINUXDO_BYPASS_REQUIRES_INVITATION",
++    //   "开启「开放 LinuxDo 注册」前请先开启「邀请码注册」")
++    // 选项 B：仅 warning 日志 + UI 确认（弱）
++}
++```
++
++### 5.2 前端
++
++| 文件 | 改动 |
++|------|------|
++| `frontend/src/api/admin/settings.ts` | 类型 |
++| `frontend/src/views/admin/SettingsView.vue` | LinuxDo 卡片 Toggle + 警告文案 |
++| `frontend/src/i18n/locales/zh|en/admin/settings.ts` | 文案 |
++| `LinuxDoCallbackView.vue` | 若后端返回 `create_account_allowed=false` / `bind_login_required`，确认 UI 隐藏「创建账号」（钉钉已支持则对照修补） |
++
++### 5.3 明确不改
++
++- `RegisterWithVerification` / `SendVerifyCode` 注册策略  
++- Backend Mode 中间件与 `ensureBackendModeAllowsNewUserLogin`  
++- 钉钉分支逻辑（除共享函数签名注释更新）  
++- 邀请码生成与消费模型  
++
++---
++
++## 6. 测试计划
++
++### 6.1 单测
++
++| 用例 | 期望 |
++|------|------|
++| `canBypass` linuxdo：enabled+bypass | true |
++| `canBypass` linuxdo：bypass false / disabled | false |
++| `canBypass` dingtalk 原矩阵 | 回归不变 |
++| `canBypass` wechat/oidc | false |
++| 注册 OFF + bypass ON → LoginOrRegister linuxdo 建号成功 | 合成邮箱用户存在 |
++| 注册 OFF + bypass OFF → ErrRegDisabled | |
++| 注册 OFF + bypass ON → 邮箱密码 Register 仍失败 | |
++| CompleteLinuxDoOAuthRegistration 同上 | |
++| RegisterOAuthEmailAccount signupSource=linuxdo 同上 | |
++| `isLinuxDoSignupBlocked` 四象限 | |
++| choice session：`create_account_allowed` 随 blocked 变化 | |
++| 注册 OFF + bypass OFF + 无 compat → bind_login_required | |
++| Backend Mode ON + bypass ON → 仍拒绝新用户 | |
++| 邀请码 ON + 注册 OFF + bypass ON 无码 → invitation_required | |
++| 设置 API round-trip + audit 含新字段 | |
++| （若 P1）bypass ON 且 invitation OFF → 保存失败 | |
++
++建议文件：
++
++- `auth_service_register_test.go`（扩展 `TestCanBypassRegistrationDisabledForOAuth`）
++- `auth_linuxdo_oauth_test.go`
++- admin setting linuxdo round-trip 测试
++
++### 6.2 手工验收
++
++1. 仅关开放注册，bypass OFF：LinuxDo 新号无法建；老号可登录。  
++2. 打开 bypass：LinuxDo 新号可建；`/register` 仍 403。  
++3. Backend Mode：仍仅管理员。  
++4. 邀请码：仍生效。  
++5. 邮箱验证 ON：建号形态（补邮箱 vs 静默）符合 email 相关设置，不被本 flag 错误短路。  
++
++---
++
++## 7. 与邮箱 bypass 方案的关系
++
++两套开关正交：
++
++| Flag | 旁路对象 |
++|------|----------|
++| `linuxdo_connect_bypass_registration` | 全局 **开放注册** |
++| `linuxdo_connect_bypass_email_on_signup`（另一文档） | 全局 **邮箱验证** 导致的补邮箱 |
++
++典型组合：
++
++```text
++registration=OFF + bypass_registration=ON + email_verify=ON
++  → 允许 LinuxDo 建号，但仍可能要求补邮箱（除非再开 email-bypass）
++
++registration=OFF + bypass_registration=ON + email_verify=OFF
++  → 最接近「关全站注册，只准 LinuxDo 一键进」
++```
++
++实施顺序建议：
++
++1. 先做 **本方案（registration bypass）** —— 接线最贴钉钉、可独立交付。  
++2. 再做 email bypass —— 解决「开放注册 ON + 邮箱验证 ON」的静默体验。  
++3. 两者都做完后补交叉矩阵测试。
++
++---
++
++## 8. 迁移与兼容
++
++| 项 | 策略 |
++|----|------|
++| 已有部署 | 默认 false，行为不变 |
++| Public settings | **不**暴露 bypass（避免客户端依赖运维开关） |
++| 配置热更新 | 与现有 setting 一致 |
++| 文档 | 更新关联分析文；运维手册写清风险与邀请码建议 |
++
++---
++
++## 9. 实施步骤与工作量
++
++| 步骤 | 内容 | 预估 |
++|------|------|------|
++| 1 | Config + setting key + admin API + UI + i18n | 0.25–0.5 d |
++| 2 | 扩展 `canBypass` + 单测 | 0.25 d |
++| 3 | LinuxDo signupBlocked + choice/callback | 0.5–1 d |
++| 4 | 交叉测试（邀请码 / 邮箱验证 / backend mode） | 0.5 d |
++| 5 | （可选 P1）保存校验邀请码 | 0.25 d |
++| 6 | 文档与发布说明 | 0.25 d |
++
++**合计：约 2～3 人日（含测试）；P0 最小可通约 1～1.5 人日。**
++
++难度结论（复述）：
++
++- **接线难度：低～中**（钉钉样板完整）。  
++- **产品风险：中～高**（无 `internal_only`）。  
++- 推荐上线捆绑 **邀请码** 或等价约束。
++
++---
++
++## 10. 风险与决策记录
++
++| 风险 | 缓解 |
++|------|------|
++| 误开 ≈ 对全 LinuxDo 隐式开放注册 | 默认 false；Hint 警告；推荐 P1 强制邀请码 |
++| Handler 不补 signupBlocked | 用户白填表单后失败 → 必须做 §4.4 |
++| 与 Backend Mode 混淆 | 文档 + 测试钉死不旁路 |
++| 双源注册判断 | 只扩展 canBypass，handler 不复制第二套规则 |
++| createEmailOAuthUser 未旁路 | LinuxDo 主路径不用；文档注明；防未来误用 |
++
++**实现前确认：**
++
++1. 是否采用 **P1（bypass 依赖邀请码）**？ → 推荐 **是**。  
++2. `settingSvc==nil` 时 signupBlocked 是否 fail-closed？ → 推荐 **是**。  
++3. 是否与 email-bypass 同 PR？ → 推荐 **分 PR**，先本方案。
++
++---
++
++## 11. 总结
++
++- 钉钉「关开放注册仍允许渠道建号」= `bypass_registration` +（钉钉专属）`internal_only` + service `canBypass` + handler `signupBlocked`。  
++- LinuxDo 对齐做法：新增 **`linuxdo_connect_bypass_registration`**，扩展 **同一** `canBypassRegistrationDisabledForOAuth`，并补齐 **signupBlocked / create_account_allowed** 全链路。  
++- 无 corp 硬边界是**固有差异**，应用文案、可选邀请码校验与运维文档补齐，而不是假装与钉钉风险等价。  
++- 默认关闭；不旁路 Backend Mode、邀请码、邮箱验证；不影响邮箱密码注册。
++
++---
++
++## 12. 相关索引
++
++| 主题 | 位置 |
++|------|------|
++| 钉钉 canBypass | `backend/internal/service/auth_service.go` |
++| 钉钉 signupBlocked | `backend/internal/handler/auth_dingtalk_oauth.go` |
++| LinuxDo callback | `backend/internal/handler/auth_linuxdo_oauth.go` |
++| 补邮箱建号门 | `backend/internal/service/auth_oauth_email_flow.go` |
++| 钉钉 UI / 文案 | `SettingsView.vue` / `zh/admin/settings.ts` → `dingtalk.bypassRegistration*` |
++| 注册关联分析 | `docs/AUTH_REGISTRATION_LINUXDO_ANALYSIS.md` |
++| 邮箱豁免方案 | `docs/LINUXDO_EMAIL_BYPASS_PROPOSAL.md` |
++
++---
++
++*本文为 `linuxdo_connect_bypass_registration` 设计方案；确认 §10 决策后可按 §9 实施。*
+diff --git a/docs/LINUXDO_EMAIL_BYPASS_PROPOSAL.md b/docs/LINUXDO_EMAIL_BYPASS_PROPOSAL.md
+new file mode 100644
+index 00000000..11111111
+--- /dev/null
++++ b/docs/LINUXDO_EMAIL_BYPASS_PROPOSAL.md
+@@ -0,0 +1,435 @@
++# LinuxDo 登录邮箱关联豁免改造方案
++
++> 背景：开放注册 ON + LinuxDo Connect ON + 邮箱验证 ON 时，LinuxDo 首次登录会被全局「邮箱验证」拖入补邮箱/建号流程。  
++> 目标：提供类似钉钉侧「可独立配置、不依赖全局邮箱验证」的豁免能力，允许可信的 LinuxDo 首注使用合成邮箱静默建号。  
++> 范围：方案设计，不含代码落地。  
++> 日期：2026-07-15  
++> 关联分析：[AUTH_REGISTRATION_LINUXDO_ANALYSIS.md](./AUTH_REGISTRATION_LINUXDO_ANALYSIS.md)
++
++---
++
++## 1. 问题定义
++
++### 1.1 当前行为（痛点）
++
++当管理端配置为：
++
++| 开关 | 值 |
++|------|----|
++| 开放注册 `registration_enabled` | **ON** |
++| LinuxDo Connect `linuxdo_connect_enabled` | **ON** |
++| 邮箱验证 `email_verify_enabled` | **ON** |
++
++LinuxDo **全新用户**（无 AuthIdentity、无 compat_email 命中）的 callback 逻辑是：
++
++```text
++emailVerificationRequired = IsEmailVerifyEnabled()   // true
++forceEmailOnSignup        = force_email_on_third_party_signup
++if compatEmailUser == nil && !emailVerificationRequired && !forceEmailOnSignup {
++    // 静默 LoginOrRegisterOAuth(合成邮箱)
++} else {
++    // createLinuxDoOAuthChoicePendingSession
++    // → step=create_account_required + email_binding_required
++    // → 前端必须填本地邮箱 + 验证码（+ 可选邀请码）
++}
++```
++
++也就是说：**全局邮箱验证一开，LinuxDo 就不能再走合成邮箱静默建号**，即使用户已经通过 LinuxDo OAuth 证明身份。
++
++相关代码：
++
++- `backend/internal/handler/auth_linuxdo_oauth.go`（`LinuxDoOAuthCallback`）
++- `createLinuxDoOAuthChoicePendingSession`（`email_verification_required` 分支）
++
++### 1.2 钉钉对照：到底豁免了什么？
++
++钉钉有两套**不同**的豁免，不要混为一谈：
++
++| 钉钉开关 | 豁免对象 | 条件 | LinuxDo 现状 |
++|----------|----------|------|--------------|
++| `dingtalk_connect_bypass_registration` | **开放注册总闸** | 仅 `corp_restriction_policy=internal_only` 且钉钉启用 | **无**等价物 |
++| `dingtalk_connect.require_email`（配置/设置） | **是否强制补邮箱** | 与全局 `email_verify_enabled` **解耦** | LinuxDo **没有**独立 `require_email`，直接读全局邮箱验证 |
++
++钉钉静默路径核心判断（简化）：
++
++```text
++if !cfg.RequireEmail {
++    // 用 dingtalk-{unionID}@...invalid 合成邮箱建 pending / 登录
++    // 不看 IsEmailVerifyEnabled
++}
++```
++
++LinuxDo 却把「能否静默」绑在了全局 `IsEmailVerifyEnabled` 上。
++
++### 1.3 本次真正要做的豁免
++
++在用户给定场景（**开放注册已开**）下，主要诉求是：
++
++> **类似钉钉 `require_email=false` 的「邮箱关联豁免」**  
++> —— 全局邮箱验证仍对「邮箱密码注册」生效，但 LinuxDo 首次登录可跳过「补本地邮箱并验码」。
++
++**不是**（至少首期不必）复刻钉钉的「关闭开放注册仍允许企业钉钉建号」；那是另一条 `bypass_registration` 能力。本方案以 **邮箱关联豁免** 为主，`registration` 豁免可作为可选扩展。
++
++---
++
++## 2. 目标与非目标
++
++### 2.1 目标
++
++1. 新增 **LinuxDo 专用** 管理开关，使在  
++   `registration_enabled=true` + `linuxdo_connect_enabled=true` + `email_verify_enabled=true`  
++   时，仍可对 **无冲突的全新 LinuxDo 用户** 使用合成邮箱静默建号并登录。
++2. 不削弱：已绑定 identity 登录、compat_email 绑定已有账号、邀请码、开放注册总闸、`force_email_on_third_party_signup` 的既有语义（见约束）。
++3. 与钉钉配置形态对齐，降低运维心智成本。
++4. 默认 **关闭** 豁免，保持现有安全默认行为。
++
++### 2.2 非目标（首期不做）
++
++- 不改变合成邮箱策略（仍用 `linuxdo-{subject}@linuxdo-connect.invalid`，**不**把 LinuxDo 上游真实邮箱直接当本地主邮箱）。
++- 不默认把上游 email 写入本地主邮箱（账号接管风险）。
++- 不自动跳过 **邀请码**（邀请码与邮箱验证正交，继续生效）。
++- 首期不做「关闭开放注册仍允许 LinuxDo 建号」（见 §7 可选扩展）。
++- 不把该豁免做成全局 `email_verify_enabled` 的子开关影响微信/OIDC（可后续做通用 provider 策略，首期仅 LinuxDo）。
++
++---
++
++## 3. 方案对比
++
++| 方案 | 思路 | 优点 | 缺点 | 推荐 |
++|------|------|------|------|------|
++| **A. LinuxDo `allow_synthetic_signup` / `bypass_email_on_signup`** | 新增 provider 级布尔开关；ON 时 callback 不再因 `email_verify_enabled` 强制补邮箱 | 语义精确、改动面小、默认可安全 | 与钉钉字段名不完全一致 | **推荐** |
++| **B. 镜像钉钉 `require_email`** | LinuxDo 增加 `require_email`，默认 true；false 时等同豁免 | 与钉钉对称 | 与现网「无此字段=跟全局邮箱验证」行为迁移需仔细定义默认值 | 可选 |
++| **C. 仅关全局邮箱验证 / 仅靠 force_email=false** | 运维绕过 | 零开发 | 关掉邮箱验证会伤密码注册/忘记密码/TOTP；无法「密码要验码、LinuxDo 不要」 | 否 |
++| **D. 用上游真实邮箱直接建号** | 信任 LinuxDo email claim | UX 简单 | 与当前防接管设计冲突，安全风险高 | 否 |
++
++**推荐方案 A**：字段名建议  
++`linuxdo_connect_bypass_email_on_signup`  
++（中文文案：**允许 LinuxDo 使用合成邮箱注册（跳过补邮箱）**）
++
++语义比 `require_email` 更贴合当前 LinuxDo 实现（本来就用合成邮箱；要豁免的是「被全局邮箱验证拖去补邮箱」）。
++
++---
++
++## 4. 推荐方案详细设计
++
++### 4.1 配置与设置模型
++
++#### 4.1.1 Setting Key
++
++```text
++linuxdo_connect_bypass_email_on_signup   // bool, 默认 false
++```
++
++#### 4.1.2 Config 回退（可选但建议）
++
++`config.LinuxDoConnectConfig` 增加：
++
++```go
++// BypassEmailOnSignup：为 true 时，LinuxDo 首次注册可不因全局 email_verify_enabled
++// 强制进入补邮箱流程，允许使用合成邮箱静默建号。
++// 仍受 registration_enabled / invitation_code / force_email_on_third_party_signup 约束。
++BypassEmailOnSignup bool `mapstructure:"bypass_email_on_signup"`
++```
++
++`deploy/config.example.yaml`：
++
++```yaml
++linuxdo_connect:
++  enabled: false
++  # ...
++  # 允许在「全局邮箱验证已开启」时，仍用合成邮箱完成 LinuxDo 首注（跳过补邮箱表单）
++  # 默认 false；打开后不影响邮箱密码注册的验码要求
++  bypass_email_on_signup: false
++```
++
++生效优先级与现有 LinuxDo 字段一致：**DB 设置覆盖 YAML**（`GetLinuxDoConnectOAuthConfig`）。
++
++#### 4.1.3 管理端 API / DTO
++
++| 层 | 字段 |
++|----|------|
++| `domain_constants.go` | `SettingKeyLinuxDoConnectBypassEmailOnSignup` |
++| `settings` DTO / update req | `linuxdo_connect_bypass_email_on_signup` |
++| `setting_parse` / `setting_update` / `setting_oauth` | 读写 + 生效合并 |
++| 审计 | `setting_handler_audit` 记录变更 |
++| 前端 `SettingsView` LinuxDo 卡片 | Toggle + 说明文案（仅 `linuxdo_connect_enabled` 时显示） |
++| i18n | zh/en `admin.settings.linuxdo.bypassEmailOnSignup*` |
++
++**不**放入 public settings（登录页无需知道该运维开关）。
++
++### 4.2 生效条件（布尔表达式）
++
++定义「LinuxDo 是否允许合成邮箱静默首注」：
++
++```text
++allowLinuxDoSyntheticSignup =
++  linuxdo_connect_enabled
++  AND registration_enabled                    // 开放注册必须开（本方案不绕过总闸）
++  AND NOT force_email_on_third_party_signup   // 全局强制补邮箱优先
++  AND (
++        NOT email_verify_enabled              // 旧行为：邮箱验证关 → 可静默
++        OR linuxdo_connect_bypass_email_on_signup  // 新行为：豁免开 → 可静默
++      )
++```
++
++Callback 伪代码改造：
++
++```go
++emailVerificationRequired := h.authService.IsEmailVerifyEnabled(ctx)
++forceEmailOnSignup := h.isForceEmailOnThirdPartySignup(ctx)
++bypassEmail := h.isLinuxDoBypassEmailOnSignup(ctx) // 读生效配置
++
++// 仅当「需要邮箱关联」时禁止静默
++requireEmailAssociation := forceEmailOnSignup ||
++    (emailVerificationRequired && !bypassEmail)
++
++if compatEmailUser == nil && !requireEmailAssociation {
++    // 尝试 LoginOrRegisterOAuthWithTokenPairAndPromoCode(合成邮箱, ...)
++    // 邀请码不足 → 仍走 invitation_required pending
++} else {
++    // createLinuxDoOAuthChoicePendingSession(...)
++}
++```
++
++`createLinuxDoOAuthChoicePendingSession` 内写入 completion 时：
++
++- 原先：`(emailVerificationRequired || forceEmailOnSignup) && compatEmailUser == nil` → `create_account_required`
++- 改为：`requireEmailAssociation && compatEmailUser == nil`（同一套 `requireEmailAssociation`）
++
++避免 handler 两处逻辑漂移。
++
++### 4.3 与其它开关的优先级
++
++从高到低（冲突时靠上的赢）：
++
++```text
++1. 已有 AuthIdentity          → 直接登录（与豁免无关）
++2. compat_email 命中本地用户  → 绑定/选择流（不静默建第二账号）
++3. force_email_on_third_party_signup = ON
++      → 仍强制补邮箱（豁免无效）
++4. registration_enabled = OFF
++      → 禁止建号（本方案不绕过）
++5. invitation_code_enabled = ON
++      → 可静默尝试，但无邀请码仍 invitation_required
++6. email_verify_enabled + bypass
++      → bypass=ON 可跳过补邮箱；bypass=OFF 保持现状
++```
++
++**推荐：`force_email_on_third_party_signup` 优先于 provider 豁免**  
++理由：该开关语义是「所有第三方都要落本地邮箱」，管理员若打开应全局生效；若未来要「全局强制但 LinuxDo 例外」，可再加更细策略，首期避免双义。
++
++### 4.4 安全边界（必须写进实现注释与 UI Hint）
++
++| 点 | 说明 |
++|----|------|
++| 主邮箱仍是合成邮箱 | 不改为 LinuxDo 上游 email，避免邮箱撞库接管 |
++| 不信任「邮箱验证」替代 | 身份锚点是 OAuth `subject` + AuthIdentity，不是 email claim |
++| 开放注册仍是总闸 | 豁免的是「补邮箱 UX」，不是「谁都能注册」 |
++| 邀请码独立 | 豁免不自动送码 |
++| 兼容邮箱绑定保留 | 若上游 email 对应已有用户，仍走 bind/choose，避免重复账号 |
++| 默认 false | 升级后行为不变 |
++
++### 4.5 组合矩阵（改造后）
++
++前提：LinuxDo 启用；全新用户；无 compat 命中；`force_email=OFF`。
++
++| 开放注册 | 邮箱验证 | **bypass_email** | 期望行为 |
++|---------|----------|------------------|----------|
++| OFF | * | * | 不可建号（本方案） |
++| ON | OFF | * | 静默合成邮箱建号（与现网一致） |
++| ON | ON | **OFF** | 补邮箱建号（与现网一致） |
++| ON | ON | **ON** | **静默合成邮箱建号（新能力）** |
++| ON | ON | ON，且邀请码 ON | 静默尝试 → 缺码则 invitation UI |
++| ON | * | *，且 force_email ON | 仍补邮箱（强制优先） |
++
++### 4.6 与钉钉能力对照表
++
++| 能力 | 钉钉 | LinuxDo（改造后） |
++|------|------|-------------------|
++| 跳过全局邮箱验证导致的补邮箱 | `require_email=false`（不读全局 email_verify） | `bypass_email_on_signup=true` |
++| 跳过开放注册总闸 | `bypass_registration` + `internal_only` | **首期不做**（§7） |
++| 合成邮箱 | `dingtalk-{unionId}@...` | `linuxdo-{subject}@...`（不变） |
++| 企业身份约束 | corp_restriction / internal | LinuxDo 无企业边界，靠 OAuth subject |
++
++---
++
++## 5. 代码改动清单（实现指引）
++
++### 5.1 后端
++
++| 文件 | 改动 |
++|------|------|
++| `backend/internal/config/config.go` | `LinuxDoConnectConfig.BypassEmailOnSignup` + default false |
++| `backend/internal/service/domain_constants.go` | Setting key 常量 |
++| `backend/internal/service/setting_oauth.go` | `GetLinuxDoConnectOAuthConfig` 合并 DB/YAML |
++| `backend/internal/service/setting_parse.go` / `setting_update.go` / `settings_view.go` | 读写 |
++| `backend/internal/handler/dto/settings.go` | 响应字段 |
++| `backend/internal/handler/admin/setting_handler*.go` | update/audit/response |
++| `backend/internal/handler/auth_linuxdo_oauth.go` | callback + choice pending 使用 `requireEmailAssociation` |
++| `deploy/config.example.yaml` | 示例与注释 |
++| 测试 | 见 §6 |
++
++### 5.2 前端
++
++| 文件 | 改动 |
++|------|------|
++| `frontend/src/api/admin/settings.ts` | 类型字段 |
++| `frontend/src/views/admin/SettingsView.vue` | LinuxDo 卡片 Toggle（enabled 时展示） |
++| `frontend/src/i18n/locales/zh/admin/settings.ts` | 标题/Hint |
++| `frontend/src/i18n/locales/en/admin/settings.ts` | 同上 |
++| 可选：`LinuxDoCallbackView` 无逻辑改动 | 静默成功时仍走现有 token / exchange 路径 |
++
++### 5.3 建议抽取的小函数
++
++```go
++// handler 或 service
++func (h *AuthHandler) linuxDoRequiresEmailAssociation(ctx context.Context) bool {
++    if h.isForceEmailOnThirdPartySignup(ctx) {
++        return true
++    }
++    if h.authService == nil || !h.authService.IsEmailVerifyEnabled(ctx) {
++        return false
++    }
++    cfg, err := h.settingSvc.GetLinuxDoConnectOAuthConfig(ctx)
++    if err != nil {
++        return true // 安全默认：配置异常时仍要求补邮箱
++    }
++    return !cfg.BypassEmailOnSignup
++}
++```
++
++配置异常时 **fail-closed**（要求补邮箱），与「设置读失败则关闭注册」风格一致。
++
++### 5.4 不改动的路径（确认）
++
++- `RegisterWithVerification` 邮箱密码注册：仍严格服从 `email_verify_enabled`
++- `VerifyOAuthEmailCode`：补邮箱路径仍强制验码（当仍进入该路径时）
++- `canBypassRegistrationDisabledForOAuth`：仍仅 dingtalk
++- 普通 `Redeem` 对 invitation 类型限制
++
++---
++
++## 6. 测试计划
++
++### 6.1 单测 / Handler 测
++
++| 用例 | 设置 | 期望 |
++|------|------|------|
++| 回归：邮箱验证 OFF | bypass 任意 | 静默建号（现有） |
++| 回归：邮箱验证 ON + bypass OFF | | `create_account_required` / 补邮箱 |
++| **新**：邮箱验证 ON + bypass ON | 开放注册 ON | 静默建号，合成邮箱，写 AuthIdentity |
++| force_email ON + bypass ON | | 仍补邮箱 |
++| 开放注册 OFF + bypass ON | | 建号失败 / 不可静默成功 |
++| 邀请码 ON + bypass ON | 无码 | `invitation_required` |
++| 邀请码 ON + bypass ON | 有码 complete-registration | 成功并 Use 码 |
++| compat_email 命中 | bypass ON | 绑定流，非第二账号 |
++| 已有 identity | | 登录，不读 bypass |
++| 设置 API round-trip | | 字段 save/load + audit |
++
++建议落点：
++
++- `backend/internal/handler/auth_linuxdo_oauth_test.go`
++- `backend/internal/handler/admin/setting_handler_*` 或 linuxdo 专用 round-trip
++- 前端 Settings 表单绑定测试（若有既有 pattern）
++
++### 6.2 手工验收清单
++
++1. 仅开：开放注册 + LinuxDo + 邮箱验证；bypass OFF → LinuxDo 新用户必须补邮箱。  
++2. 打开 bypass → 同一用户（清 cookie / 新 subject）可一键登录，用户表 email 为合成邮箱。  
++3. 邮箱密码注册仍要求验证码。  
++4. 打开「强制第三方补邮箱」→ 即使 bypass ON 也要补邮箱。  
++5. 邀请码开启 → 仍弹邀请码。  
++
++---
++
++## 7. 可选扩展（二期）
++
++### 7.1 `linuxdo_connect_bypass_registration`
++
++完全对齐钉钉「关开放注册仍允许某渠道建号」。
++
++- LinuxDo **没有** `internal_only` 企业边界，风险高于钉钉。  
++- 若做：必须额外约束（例如仅管理员生成的 allowlist trust level、或强制邀请码、或 IP/限流）。  
++- **不建议**在无额外信任边界时单独打开。
++
++### 7.2 通用 `oauth_provider_email_policy`
++
++将 wechat/oidc/linuxdo 统一为：
++
++```text
++email_policy: inherit_global | require | allow_synthetic
++```
++
++首期为 LinuxDo 专用布尔即可，避免过大重构。
++
++### 7.3 合成邮箱后续绑定引导
++
++静默建号后在 Profile 提示「绑定真实邮箱」，方便找回密码（合成邮箱无法收信）。属产品增强，非本豁免必需。
++
++---
++
++## 8. 迁移与兼容
++
++| 项 | 策略 |
++|----|------|
++| 已有部署 | 默认 `false`，行为与改造前一致 |
++| 无 DB 键 | 回退 YAML 默认 false |
++| Public API | 不新增字段（避免前端缓存兼容问题） |
++| 文档 | 更新运维说明：邮箱验证与 LinuxDo 可解耦 |
++
++---
++
++## 9. 实施步骤建议
++
++1. **配置面**：key + config + admin API + Settings UI + i18n  
++2. **核心逻辑**：`auth_linuxdo_oauth.go` 统一 `requireEmailAssociation`  
++3. **测试**：§6 矩阵全绿  
++4. **文档**：更新 `AUTH_REGISTRATION_LINUXDO_ANALYSIS.md` 增补 bypass 行  
++5. **发布说明**：注明安全默认与推荐场景（社区 LinuxDo 信任登录 + 仍要邮箱密码验码）
++
++预估工作量（供排期）：
++
++- 后端 + 测试：0.5–1 d  
++- 前端 + i18n：0.25–0.5 d  
++- 联调/文档：0.25 d  
++
++---
++
++## 10. 风险与决策记录
++
++| 风险 | 缓解 |
++|------|------|
++| 管理员误开 bypass，弱化「全站必须验邮箱」政策 | UI Hint 明确「仅 LinuxDo 合成邮箱首注；密码注册仍要验码」；默认 OFF |
++| 与 force_email 冲突理解 | 文档写清优先级；force 优先 |
++| 用户持合成邮箱无法重置密码 | 引导绑定真实邮箱（§7.3）；忘记密码本就依赖真实邮箱 |
++| 命名与钉钉不一致 | 文档对照表；后续可 alias 不推荐 |
++
++**产品决策确认点（实现前）**：
++
++1. ~~是否连 registration bypass 一起做？~~ → 首期 **否**（本文默认）。  
++2. force_email 是否允许被 LinuxDo bypass 覆盖？ → 首期 **否**（force 优先）。  
++3. 字段名用 `bypass_email_on_signup` 还是 `require_email`？ → 推荐前者（§3）。
++
++---
++
++## 11. 总结
++
++- 现状：全局 **邮箱验证 ON** 会强制 LinuxDo 补邮箱，与钉钉「`require_email` 与全局邮箱验证解耦」不一致。  
++- 钉钉的 `bypass_registration` 是另一维度（绕过开放注册），**不是**本次主需求。  
++- 推荐新增 **`linuxdo_connect_bypass_email_on_signup`**：在开放注册已开的前提下，允许 LinuxDo 在全局邮箱验证开启时仍用合成邮箱静默首注；邀请码、开放注册、force_email、compat 绑定逻辑保持不变。  
++- 默认关闭，保证升级兼容与安全默认。
++
++---
++
++## 12. 相关代码索引
++
++- LinuxDo callback 分流：`backend/internal/handler/auth_linuxdo_oauth.go`
++- 钉钉 require_email / signupBlocked：`backend/internal/handler/auth_dingtalk_oauth.go`
++- 注册总闸 OAuth 豁免（仅钉钉）：`AuthService.canBypassRegistrationDisabledForOAuth`
++- 全局强制补邮箱：`force_email_on_third_party_signup` / `isForceEmailOnThirdPartySignup`
++- 设置生效：`GetLinuxDoConnectOAuthConfig`、`setting_features.IsEmailVerifyEnabled`
++- 现网关联分析：`docs/AUTH_REGISTRATION_LINUXDO_ANALYSIS.md`
++
++---
++
++*本文为改造方案，确认产品决策后可按 §9 实施。*
